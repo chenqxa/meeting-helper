@@ -1,0 +1,242 @@
+import { NextResponse } from 'next/server';
+import { createMeeting, updateMeeting } from '@/storage/database/memory-storage';
+
+// 造几份测试数据
+export async function POST() {
+  const seeds = [
+    {
+      title: '产品Q3季度规划会',
+      type: '产品会议',
+      meetingDate: '2026-04-18',
+      participants: ['张三', '李四', '王五', '赵六'],
+      organizer: '张三',
+      content: `[张三]: 各位好，今天主要讨论Q3的产品规划。首先回顾一下Q2的进展，整体上完成率是85%。
+[李四]: 技术侧这边，新版本的搜索引擎已经上线，性能提升了40%，但是推荐系统还在调优中。
+[张三]: 推荐系统这个得加紧，用户反馈很多。李四你这边排一下优先级，争取6月底前完成核心算法的迭代。
+[王五]: 运营数据看，日活已经突破了50万，但留存率从上个月的35%降到了30%，需要关注一下。
+[赵六]: 我们市场部已经在准备暑期推广方案了，预计7月启动。不过预算还需要审批。
+[张三]: 预算这个我来推动，赵六你先把方案细化，下周三之前给我初稿。
+[李四]: 另外还有个技术债的问题，我们的数据库连接池经常到达上限，需要扩容。这个比较紧急，影响线上稳定性。
+[张三]: 这个确实紧急，李四你明天就安排处理。还有前端性能优化的事情，王五你们产品侧有什么需求？
+[王五]: 首页加载速度需要优化，现在首屏要4秒太慢了，目标2秒以内。另外移动端的适配也需要重新做一下。
+[张三]: 好的，那Q3就聚焦这几个方向：推荐系统升级、留存率提升、暑期推广、技术债处理。各自回去排一下详细计划。`,
+      summary: {
+        overview: '本次会议回顾了Q2进展（完成率85%），讨论了Q3重点方向：推荐系统算法迭代、用户留存率优化（从30%提升）、暑期推广方案、技术债务处理（数据库扩容等）。会议确定了各项工作的负责人和时间节点。',
+        keyTopics: [
+          { topic: 'Q2回顾', description: '整体完成率85%，搜索引擎上线提升40%，推荐系统仍在调优', importance: 'medium' },
+          { topic: '推荐系统升级', description: '用户反馈多，需6月底前完成核心算法迭代', importance: 'high' },
+          { topic: '用户留存率下降', description: '从35%降至30%，需重点关注', importance: 'high' },
+          { topic: '暑期推广方案', description: '7月启动，预算待审批', importance: 'medium' },
+          { topic: '技术债务', description: '数据库连接池达上限，影响线上稳定性', importance: 'high' },
+        ],
+        decisions: [
+          { decision: 'Q3聚焦四大方向', rationale: '基于Q2数据分析和用户反馈', impact: '明确了团队的工作重心', stakeholders: ['张三', '李四', '王五', '赵六'] },
+          { decision: '数据库扩容列为紧急处理', rationale: '影响线上稳定性', impact: '保障系统可用性', stakeholders: ['李四'] },
+        ],
+        risks: [
+          { risk: '推广预算审批可能延迟', probability: 'medium', impact: 'high', mitigation: '张三提前推动审批流程' },
+          { risk: '推荐算法迭代周期可能超期', probability: 'medium', impact: 'high', mitigation: '李四按周汇报进度' },
+        ],
+        nextSteps: [
+          { step: '推荐系统核心算法迭代', owner: '李四', timeline: '6月底', priority: 'high' },
+          { step: '暑期推广方案初稿', owner: '赵六', timeline: '下周三', priority: 'high' },
+          { step: '推动推广预算审批', owner: '张三', timeline: '本周', priority: 'high' },
+          { step: '各方向详细计划制定', owner: '全体', timeline: '下周', priority: 'medium' },
+        ],
+        participants: ['张三', '李四', '王五', '赵六'],
+        meetingDate: '2026-04-18',
+        estimatedDuration: '45分钟',
+        title: '产品Q3季度规划会',
+      },
+      actionItems: [
+        {
+          id: 'action-1',
+          description: '完成推荐系统核心算法迭代',
+          assignee: '李四',
+          dueDate: '2026-06-30',
+          priority: 'high',
+          status: 'pending',
+          initialResult: '推荐系统点击率提升20%以上，算法响应时间控制在200ms以内',
+          confidence: { assignee: 0.95, dueDate: 0.85, priority: 0.9 },
+          sourceText: '李四你这边排一下优先级，争取6月底前完成核心算法的迭代',
+          category: 'task',
+        },
+        {
+          id: 'action-2',
+          description: '细化暑期推广方案并提交初稿',
+          assignee: '赵六',
+          dueDate: '2026-04-23',
+          priority: 'high',
+          status: 'pending',
+          initialResult: '完成推广方案文档，包含渠道策略、预算明细、KPI目标',
+          confidence: { assignee: 0.95, dueDate: 0.9, priority: 0.85 },
+          sourceText: '赵六你先把方案细化，下周三之前给我初稿',
+          category: 'task',
+        },
+        {
+          id: 'action-3',
+          description: '处理数据库连接池扩容',
+          assignee: '李四',
+          dueDate: '2026-04-19',
+          priority: 'high',
+          status: 'pending',
+          initialResult: '数据库连接池从200扩容至500，P99响应时间恢复正常',
+          confidence: { assignee: 0.9, dueDate: 0.95, priority: 0.95 },
+          sourceText: '这个确实紧急，李四你明天就安排处理',
+          category: 'task',
+        },
+        {
+          id: 'action-4',
+          description: '推动暑期推广预算审批',
+          assignee: '张三',
+          dueDate: '2026-04-25',
+          priority: 'high',
+          status: 'pending',
+          initialResult: '预算审批流程通过，预算金额确认',
+          confidence: { assignee: 0.9, dueDate: 0.6, priority: 0.8 },
+          sourceText: '预算这个我来推动',
+          category: 'follow-up',
+        },
+        {
+          id: 'action-5',
+          description: '优化首页加载速度至2秒以内',
+          assignee: null,
+          dueDate: null,
+          priority: 'medium',
+          status: 'pending',
+          initialResult: '首屏加载时间从4秒降至2秒以内，LCP指标达标',
+          confidence: { assignee: 0.1, dueDate: 0.1, priority: 0.7 },
+          sourceText: '首页加载速度需要优化，现在首屏要4秒太慢了，目标2秒以内',
+          category: 'task',
+        },
+        {
+          id: 'action-6',
+          description: '重新适配移动端页面',
+          assignee: null,
+          dueDate: null,
+          priority: 'low',
+          status: 'pending',
+          initialResult: '移动端主要页面适配完成，各机型兼容性测试通过',
+          confidence: { assignee: 0.1, dueDate: 0.1, priority: 0.5 },
+          sourceText: '移动端的适配也需要重新做一下',
+          category: 'task',
+        },
+      ],
+    },
+    {
+      title: '技术评审 - 用户中心重构方案',
+      type: '技术评审',
+      meetingDate: '2026-04-20',
+      participants: ['李四', '陈七', '周八'],
+      organizer: '李四',
+      content: `[李四]: 今天评审用户中心的重构方案。目前老系统是PHP写的，性能和维护成本都很高。
+[陈七]: 我的方案是迁移到Go微服务架构，拆分成用户服务、认证服务、权限服务三个模块。
+[周八]: 数据迁移怎么考虑的？现在有3000万用户数据。
+[陈七]: 计划用双写方案，先新老系统并行跑两周，验证数据一致性后再切流。
+[李四]: 这个方案我同意。但是认证这块涉及到第三方登录，微信和支付宝的回调地址变更需要提前报备。
+[陈七]: 对，我会整理一个第三方变更清单。另外测试方面，周八你能不能出一份回归测试计划？
+[周八]: 可以，不过需要知道接口变更点。陈七你先出接口文档，我再写测试用例。
+[李四]: 好，时间安排是这样：5月上旬完成开发，5月中旬开始联调，6月初灰度上线。大家觉得可以吗？
+[陈七]: 时间有点紧，但如果前端配合到位应该可以。
+[周八]: 我建议留一周的buffer时间，之前几次都有延期。
+[李四]: 合理。那灰度推迟到6月中旬。另外注意数据库的索引优化，之前查询慢的问题也一并解决。`,
+      summary: {
+        overview: '本次技术评审讨论了用户中心从PHP迁移到Go微服务架构的方案，包括服务拆分策略、数据迁移双写方案、第三方登录对接变更、测试计划和时间安排。确定灰度上线时间推迟至6月中旬。',
+        keyTopics: [
+          { topic: '架构迁移方案', description: '从PHP迁移至Go微服务，拆分用户/认证/权限三个服务', importance: 'high' },
+          { topic: '数据迁移策略', description: '3000万用户数据双写方案，并行跑两周验证', importance: 'high' },
+          { topic: '时间安排调整', description: '灰度上线从6月初推迟至6月中旬，增加buffer', importance: 'medium' },
+        ],
+        decisions: [
+          { decision: '采用Go微服务架构方案', rationale: '解决PHP性能和维护成本问题', impact: '系统性能和可维护性大幅提升', stakeholders: ['李四', '陈七'] },
+          { decision: '灰度上线推迟至6月中旬', rationale: '留一周buffer避免延期', impact: '降低项目风险', stakeholders: ['李四', '陈七', '周八'] },
+        ],
+        risks: [
+          { risk: '第三方登录回调地址变更可能导致服务中断', probability: 'medium', impact: 'high', mitigation: '提前报备微信和支付宝' },
+          { risk: '3000万数据迁移可能出现一致性问题', probability: 'medium', impact: 'high', mitigation: '双写验证两周后才切流' },
+        ],
+        nextSteps: [
+          { step: '接口文档输出', owner: '陈七', timeline: '本周', priority: 'high' },
+          { step: '回归测试计划', owner: '周八', timeline: '接口文档完成后', priority: 'high' },
+          { step: '第三方变更清单', owner: '陈七', timeline: '本周', priority: 'medium' },
+        ],
+        participants: ['李四', '陈七', '周八'],
+        meetingDate: '2026-04-20',
+        estimatedDuration: '60分钟',
+        title: '技术评审 - 用户中心重构方案',
+      },
+      actionItems: [
+        {
+          id: 'action-1',
+          description: '输出用户中心Go微服务接口文档',
+          assignee: '陈七',
+          dueDate: '2026-04-25',
+          priority: 'high',
+          status: 'pending',
+          initialResult: '完成用户服务、认证服务、权限服务的API接口文档，包含请求/响应格式和错误码',
+          confidence: { assignee: 0.95, dueDate: 0.8, priority: 0.9 },
+          sourceText: '陈七你先出接口文档，我再写测试用例',
+          category: 'task',
+        },
+        {
+          id: 'action-2',
+          description: '编写回归测试计划和用例',
+          assignee: '周八',
+          dueDate: null,
+          priority: 'high',
+          status: 'pending',
+          initialResult: '覆盖所有核心接口的回归测试用例集，包含正常流程和边界场景',
+          confidence: { assignee: 0.95, dueDate: 0.3, priority: 0.85 },
+          sourceText: '周八你能不能出一份回归测试计划',
+          category: 'task',
+        },
+        {
+          id: 'action-3',
+          description: '整理第三方登录变更清单（微信、支付宝）',
+          assignee: '陈七',
+          dueDate: '2026-04-25',
+          priority: 'medium',
+          status: 'pending',
+          initialResult: '输出变更项清单文档，包含回调地址、证书更新、审核时间等',
+          confidence: { assignee: 0.9, dueDate: 0.7, priority: 0.7 },
+          sourceText: '我会整理一个第三方变更清单',
+          category: 'task',
+        },
+        {
+          id: 'action-4',
+          description: '优化数据库索引解决查询慢问题',
+          assignee: null,
+          dueDate: null,
+          priority: 'medium',
+          status: 'pending',
+          initialResult: '关键查询响应时间降至100ms以内，慢查询日志清零',
+          confidence: { assignee: 0.1, dueDate: 0.1, priority: 0.6 },
+          sourceText: '注意数据库的索引优化，之前查询慢的问题也一并解决',
+          category: 'task',
+        },
+      ],
+    },
+  ];
+
+  const results = [];
+  for (const seed of seeds) {
+    const meeting = await createMeeting({
+      title: seed.title,
+      type: seed.type,
+      meetingDate: seed.meetingDate,
+      participants: seed.participants,
+      organizer: seed.organizer,
+      content: seed.content,
+    });
+
+    await updateMeeting(meeting.id, {
+      summary: seed.summary,
+      actionItems: seed.actionItems,
+      status: 'review',
+    });
+
+    results.push({ id: meeting.id, title: seed.title });
+  }
+
+  return NextResponse.json({ success: true, data: results });
+}

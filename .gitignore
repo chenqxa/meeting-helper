@@ -23,6 +23,66 @@ coverage/
 .env.development.local
 .env.test.local
 .env.production.local
+.env.development
+.env.test
+.env.production
+.env.utf8
+*.env
+!*.env.example
+.env.*
+
+# 敏感密钥文件
+oa-keys.txt
+cookies.txt
+*.pem
+*.key
+
+# 数据备份与临时脚本
+*-backup-*.json
+*-backup*.json
+temp-*.mjs
+temp-*.ts
+temp-*.js
+tmp-*.json
+
+# 临时/调试/生成文件
+.dbg/
+_*.ts
+_*.js
+_debug_*
+check-*.ts
+debug-*.ts
+debug-*.json
+debug-*.md
+test-*.ts
+test-*.js
+temp-*
+*.log
+~$*
+*.bin
+*.jpeg
+*_tmp_*.cjs
+scripts/_dl_*
+scripts/_tmp_*
+
+# 业务文档与数据（不进 git）
+*.xlsx
+*.pdf
+*.docx
+*.doc
+base-data.json
+debug-meeting.json
+feedback-data.json
+meetings-data.json
+org-data.json
+roles.json
+.ep.json
+.ew.json
+training-video/
+training-video-real/
+.uploads/
+_package/
+*.zip
 
 # Logs
 logs/

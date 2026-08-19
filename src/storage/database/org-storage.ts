@@ -7,6 +7,8 @@ import { join } from 'path';
 export interface Employee {
   id: string;
   name: string;              // 姓名
+  loginid?: string;          // OA 登录账号（loginid）
+  oaId?: string;             // OA 系统中的数字 ID (如 149)
   code: string;              // 工号
   position: string;          // 职位
   departmentId: string;      // 所属部门ID
@@ -163,6 +165,29 @@ export const deleteDepartment = async (id: string): Promise<boolean> => {
   state.departments.splice(index, 1);
   saveToFile();
   return true;
+};
+
+// 级联删除部门：先递归删子部门，再将员工标记离职，最后删本部门
+export const deleteDepartmentCascade = async (id: string): Promise<void> => {
+  const state = freshRead();
+  // 递归收集所有子孙部门 ID（从叶子到根）
+  const collectDescendants = (parentId: string): string[] => {
+    const children = state.departments.filter(d => d.parentId === parentId).map(d => d.id);
+    return [...children.flatMap(collectDescendants), ...children];
+  };
+  const toDelete = [...collectDescendants(id), id];
+  const toDeleteSet = new Set(toDelete);
+  // 员工标记离职（不物理删除，保留历史）
+  state.employees.forEach(e => {
+    if (e.departmentId && toDeleteSet.has(e.departmentId)) {
+      e.status = 'resigned';
+      e.departmentId = undefined as unknown as string;
+      e.updatedAt = new Date().toISOString();
+    }
+  });
+  // 从叶子到根依次删除部门
+  state.departments = state.departments.filter(d => !toDeleteSet.has(d.id));
+  saveToFile();
 };
 
 // ── 员工 CRUD ──

@@ -31,10 +31,46 @@ function getSupportedMimeType(): string {
   return 'audio/webm';
 }
 
+const CHUNK_SECONDS = 180; // 每 3 分钟切一段
+
+// 浏览器端：将 Blob 转为 16kHz 16bit 单声道 PCM（不依赖 ffmpeg）
+async function audioBlobToPcm16k(blob: Blob): Promise<ArrayBuffer> {
+  const arrayBuffer = await blob.arrayBuffer();
+  const tmpCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const decoded = await tmpCtx.decodeAudioData(arrayBuffer);
+  await tmpCtx.close();
+
+  const targetRate = 16000;
+  const offlineCtx = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetRate), targetRate);
+  const src = offlineCtx.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offlineCtx.destination);
+  src.start(0);
+  const rendered = await offlineCtx.startRendering();
+
+  const floats = rendered.getChannelData(0);
+  const pcm16 = new Int16Array(floats.length);
+  for (let i = 0; i < floats.length; i++) {
+    const s = Math.max(-1, Math.min(1, floats[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return pcm16.buffer;
+}
+
+// 将 PCM buffer 切成若干段
+function chunkPcm(buffer: ArrayBuffer, chunkSecs: number, sampleRate = 16000): ArrayBuffer[] {
+  const bytesPerChunk = chunkSecs * sampleRate * 2;
+  const chunks: ArrayBuffer[] = [];
+  for (let offset = 0; offset < buffer.byteLength; offset += bytesPerChunk) {
+    chunks.push(buffer.slice(offset, offset + bytesPerChunk));
+  }
+  return chunks;
+}
+
 export function AudioRecorder({
   onRecordingComplete,
   onTranscriptReceived,
-  maxDuration = 600,
+  maxDuration = 7200, // 默认最长 2 小时
 }: AudioRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -44,6 +80,7 @@ export function AudioRecorder({
   const [error, setError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [debugInfo, setDebugInfo] = useState<string>('');
+  const [transcribeProgress, setTranscribeProgress] = useState<string>('');
   const [speakerDialogData, setSpeakerDialogData] = useState<{ speakers: string[]; labeledText: string } | null>(null);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -243,45 +280,30 @@ export function AudioRecorder({
 
   const handleTranscribe = async () => {
     if (!audioBlob) return;
-    
-    console.log('[Recorder] Starting Xunfei transcription, blob size:', audioBlob.size, 'type:', audioBlob.type);
+
     setIsTranscribing(true);
     setError(null);
-    setDebugInfo('正在转写（讯飞ASR）...');
-    
+    setTranscribeProgress('正在转写...');
+
     try {
+      // ── 直接发原始音频到 SiliconFlow FunAudioLLM，无需 ffmpeg 或讯飞 ──
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
-      
-      // 调用讯飞 ASR API
-      const res = await fetch('/api/transcribe-xf', {
-        method: 'POST',
-        body: formData,
-      });
-      
-      console.log('[Recorder] Transcription response status:', res.status);
-      
+
+      const res = await fetch('/api/transcribe', { method: 'POST', body: formData });
       const data = await res.json();
-      console.log('[Recorder] Transcription result:', data);
-      
-      if (data.success) {
-        if (data.hasSpeakers && data.speakers?.length > 1) {
-          // 有多个说话人，弹出标注对话框
-          setSpeakerDialogData({ speakers: data.speakers, labeledText: data.text });
-          setDebugInfo(`识别到 ${data.speakers.length} 位说话人`);
-        } else {
-          // 单说话人或无标注，直接使用
-          onTranscriptReceived?.(data.text);
-          setDebugInfo(`转写成功: ${data.text.length} 字符`);
-        }
-      } else {
-        setError(data.error || '转写失败');
-        setDebugInfo('');
-      }
+
+      if (!data.success) throw new Error(data.error || '转写失败');
+
+      const text = data.text || '';
+      if (!text) throw new Error('未能识别出文字，请检查录音质量');
+
+      onTranscriptReceived?.(text);
+      setTranscribeProgress(`转写完成：${text.length} 字符`);
     } catch (err: any) {
       console.error('[Recorder] Transcription error:', err);
-      setError('转写请求失败: ' + (err.message || '网络错误'));
-      setDebugInfo('');
+      setError(err.message || '转写失败');
+      setTranscribeProgress('');
     } finally {
       setIsTranscribing(false);
     }
@@ -404,14 +426,22 @@ export function AudioRecorder({
         </div>
       )}
 
+      {/* 转写进度 */}
+      {transcribeProgress && (
+        <p className="text-xs text-blue-600 font-medium flex items-center gap-1.5">
+          <Loader2 className="w-3 h-3 animate-spin" />
+          {transcribeProgress}
+        </p>
+      )}
+
       {/* 调试信息 */}
-      {debugInfo && (
+      {debugInfo && !transcribeProgress && (
         <p className="text-xs text-slate-500 font-mono">{debugInfo}</p>
       )}
 
       {/* 提示 */}
       <p className="text-xs text-slate-400">
-        建议每次录音不超过 {maxDuration / 60} 分钟，录音完成后点击「转写文字」进行 AI 识别
+        支持长时间录音，自动分段转写，无需安装 ffmpeg
       </p>
     </div>
   );

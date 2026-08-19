@@ -19,6 +19,7 @@ interface WeaverDept {
 interface WeaverEmp {
   id?: string;           // 泛微员工ID（可选，用于映射）
   name: string;          // 姓名
+  loginid?: string;      // OA 登录账号
   code: string;          // 工号
   position?: string;     // 职位
   departmentCode: string; // 部门编码（用于关联部门）
@@ -34,7 +35,7 @@ interface SyncRequest {
   type: 'full' | 'incremental';  // 同步类型：全量/增量
   departments?: WeaverDept[];    // 部门数据
   employees?: WeaverEmp[];       // 员工数据
-  removeMissing?: boolean;     // 是否删除本地不存在的外部数据（仅全量同步）
+  removeMissing?: boolean;       // 是否处理本地不在外部数据中的记录（全量同步时生效，员工标记离职而非删除）
 }
 
 // POST /api/org/sync - 泛微OA组织架构同步
@@ -105,55 +106,61 @@ export async function POST(request: NextRequest) {
     }
 
     // 同步员工
-    const empResults: { created: number; updated: number; deleted: number } = { created: 0, updated: 0, deleted: 0 };
+    const empResults: { created: number; updated: number; resigned: number; deptChanged: number; skipped: number } = { created: 0, updated: 0, resigned: 0, deptChanged: 0, skipped: 0 };
     
     for (const emp of employees) {
       const deptId = deptCodeMap.get(emp.departmentCode);
       if (!deptId) {
-        console.warn(`员工 ${emp.name} 的部门 ${emp.departmentCode} 不存在，跳过`);
+        console.warn(`员工 ${emp.name} 的部门 ${emp.departmentCode} 不存在，已归入未分类部门`);
+        empResults.skipped++;
         continue;
       }
 
       const existingId = empCodeMap.get(emp.code);
       
       if (existingId) {
-        // 更新
+        // 更新 — 检测是否换部门
+        const existing = existingEmps.find(e => e.id === existingId);
+        const deptChanged = existing && existing.departmentId !== deptId;
         await updateEmployee(existingId, {
           name: emp.name,
+          loginid: emp.loginid || undefined,
           code: emp.code,
           position: emp.position,
           departmentId: deptId,
           email: emp.email,
           phone: emp.phone,
           managerId: emp.managerCode ? empCodeMap.get(emp.managerCode) : undefined,
-          status: (emp.status === 'active' || emp.status === 'inactive' || emp.status === 'resigned') ? emp.status : 'active',
+          status: 'active',
           joinedAt: emp.joinedAt || new Date().toISOString().split('T')[0],
         });
+        if (deptChanged) empResults.deptChanged++;
         empResults.updated++;
       } else {
-        // 创建
+        // 新员工
         await createEmployee({
           name: emp.name,
+          loginid: emp.loginid || undefined,
           code: emp.code,
           position: emp.position || '',
           departmentId: deptId,
           email: emp.email || '',
           phone: emp.phone || '',
           managerId: emp.managerCode ? empCodeMap.get(emp.managerCode) : undefined,
-          status: (emp.status === 'active' || emp.status === 'inactive' || emp.status === 'resigned') ? emp.status : 'active',
+          status: 'active',
           joinedAt: emp.joinedAt || new Date().toISOString().split('T')[0],
         });
         empResults.created++;
       }
     }
 
-    // 全量同步时删除本地不存在的外部员工
+    // 全量同步：本地有但OA不再有的员工 → 标记离职（不物理删除，保留历史）
     if (type === 'full' && removeMissing) {
       const externalCodes = new Set(employees.map(e => e.code));
       for (const emp of existingEmps) {
-        if (!externalCodes.has(emp.code)) {
-          await deleteEmployee(emp.id);
-          empResults.deleted++;
+        if (emp.status !== 'resigned' && !externalCodes.has(emp.code)) {
+          await updateEmployee(emp.id, { status: 'resigned' });
+          empResults.resigned++;
         }
       }
     }

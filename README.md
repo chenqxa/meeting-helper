@@ -336,6 +336,133 @@ export const useStore = create<Store>((set) => ({
 
 推荐使用 Prisma 或 Drizzle ORM，在 `src/lib/db.ts` 中配置。
 
+## 待办推送配置指南
+
+系统内置了将行动项待办通过内部 IM 推送给责任人的定时任务，默认关闭。按照下面的步骤启用并验证：
+
+### 1. 配置聊天系统环境变量
+
+`.env` 中需要先填写聊天系统的基础信息（若已有可跳过）：
+
+```env
+CHAT_ADMIN_API_BASE_URL=http://example.com/admin
+CHAT_API_BASE_URL=http://example.com/chat
+CHAT_ADMIN_ACCOUNT=管理员账号
+CHAT_ADMIN_PASSWORD=管理员密码
+CHAT_SENDER_USER_ID=IM发送账号
+```
+
+### 2. 启用定时推送
+
+新增（或修改）以下变量来控制推送计划：
+
+```env
+CHAT_TODO_PUSH_ENABLED=true            # true 开启，其他值均视为关闭
+CHAT_TODO_PUSH_TIMES=09:00,17:30        # 支持多个 HH:mm，逗号分隔
+CHAT_TODO_PUSH_PROJECT_ID=             # 可选：仅推送指定项目 ID 的行动项
+CHAT_TODO_PUSH_FORMAT=text             # text 或 card
+CHAT_TODO_PUSH_MAX_ITEMS=20            # 可选：每人最多包含多少条，留空不限
+CHAT_TODO_INCLUDE_HEADER=true          # false 时不显示总标题
+CHAT_TODO_PUSH_ID_PREFIX=hyzs          # 可选：幂等键前缀，跨多实例时区分来源
+CHAT_TODO_PUSH_RUN_ON_START=false      # true 时，服务启动约 20s 后立即跑一次
+```
+
+保存 `.env` 后重启服务（本地 `pnpm dev` 直接 Ctrl+C 再启动，Docker 需重新部署）。日志会输出下一次执行时间，例如：
+
+```
+[TodoPush] 下次推送(09:00): 2026/06/04 09:00:00（14小时37分钟后）
+```
+
+> 提示：推送依赖组织架构数据中的 `loginid`。请确保已同步 OA 员工信息，否则找不到责任人的 OA 账号会被跳过并在日志中告警。
+
+### 3. 手动触发与排查
+
+若需要临时验证，可直接调用已有的接口：
+
+```bash
+curl -X POST http://localhost:5000/api/chat/send-todo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "oaUserId": "10001",
+    "ownerLoginId": "zhangsan",
+    "maxItems": 10
+  }'
+```
+
+响应会返回发送成功/失败详情；在服务日志中也能看到失败原因及被跳过的负责人名单。
+
+常见排查方向：
+
+1. **未登录聊天接口**：检查聊天环境变量是否填写正确。
+2. **未找到账户**：确认行动项的 `ownerLoginId` 或组织架构中员工 `loginid` 是否存在。
+3. **幂等重复**：同一用户当天多次触发会命中幂等，日志中会标记 `idempotentHit`，属正常现象。
+
+## 测试数据初始化
+
+需要快速演示项目/会议/行动项联动时，可使用内置的 `/api/seed` 路由批量生成测试数据。该接口具备幂等保护：
+
+- 如果项目或会议已存在（按名称匹配），会复用并更新摘要，不会重复插入。
+- 行动项按 `meetingId + originalId` 检查，已存在的记录不会再次写入。
+- 会自动补齐演示用的项目文档（Artifact）。
+
+### 1. 启动服务
+
+```bash
+pnpm dev
+```
+
+默认监听 `http://localhost:5000`，确保数据库连接已配置（或使用内存模式）。
+
+### 2. 调用 Seed 接口
+
+```bash
+curl -X POST http://localhost:5000/api/seed
+```
+
+成功响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "projects": [
+      { "id": "PRJ_...", "name": "智能客服提效计划", "status": "created" },
+      { "id": "PRJ_...", "name": "用户中心重构", "status": "existing" }
+    ],
+    "meetings": [
+      { "id": "MTG_...", "title": "产品Q3季度规划会", "status": "created" },
+      { "id": "MTG_...", "title": "技术评审 - 用户中心重构方案", "status": "updated" }
+    ],
+    "createdArtifacts": 3,
+    "createdActionItems": 10,
+    "createdRequirements": 3,
+    "createdRisks": 2
+  }
+}
+```
+
+数据内容概览：
+
+1. **项目**：智能客服提效计划、用户中心重构、营销自动化 MVP（含 owner、成员、阶段、目标日期）。
+2. **会议**：每个项目附带 1 场示例纪要，内含摘要、决策和行动项列表。
+3. **行动项**：覆盖 `candidate/in_progress/block/done` 等状态，预填负责人与截止日期，用于验证推送与看板筛选。
+4. **需求**：按项目生成 3 条样例需求，覆盖草稿、评审、已通过等状态。
+5. **风险**：注入典型项目风险与缓解方案，支撑风险台账调试。
+6. **文档**：每个项目自动挂载一份示例 Artifact，便于前端文档列表展示。
+
+### 3. 清理演示数据（可选）
+
+目前未提供一键回滚，请按需手动清理：
+
+1. 删除相关会议/项目记录（可在对应页面或数据库中操作）。
+2. 运行调试接口移除悬挂行动项：
+
+```bash
+curl -X POST http://localhost:5000/api/debug/cleanup-orphan-actions
+```
+
+该接口仅会删除 `meeting_id` 为空或关联会议已不存在的行动项，安全可控。
+
 ## 技术栈
 
 - **框架**: Next.js 16.1.1 (App Router)

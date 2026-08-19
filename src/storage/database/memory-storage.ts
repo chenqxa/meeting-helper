@@ -9,13 +9,24 @@ export interface Meeting {
   content?: string;
   type: string;
   meetingDate: string;
+  department?: string;          // 所属部门
   participants: string[];
   organizer: string;
+  organizerLoginId?: string;   // OA loginid of organizer
+  projectId?: string | null;   // 所属项目
   createdAt: string;
   updatedAt: string;
   status?: 'draft' | 'locked' | 'archived' | 'review';
+  version?: number;
+  locked_version?: number;
   summary?: any;
   actionItems?: any[];
+  minutes?: any;
+  wecomPushedAt?: string;      // 企业微信推送时间（首次归档时记录）
+  oaPushedAt?: string;         // OA推送时间（首次归档时记录）
+  defaultProposer?: string;    // 行动项默认提出人（与创建人/主持人解耦）
+  defaultProposerLoginId?: string;
+  defaultProposerOaId?: string;
 }
 
 // File-based persistence
@@ -81,6 +92,7 @@ export const createMeeting = async (data: Omit<Meeting, 'id' | 'createdAt' | 'up
   const meeting: Meeting = {
     ...data,
     id: state.nextId.toString(),
+    version: 1,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

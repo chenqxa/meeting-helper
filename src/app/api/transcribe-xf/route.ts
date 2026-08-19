@@ -51,42 +51,64 @@ export async function POST(request: NextRequest) {
 
     console.log('[TranscribeXF] Received audio:', audioFile.size, 'bytes, type:', audioFile.type);
 
-    // 检查文件大小（限制 10MB）
-    const maxSize = 10 * 1024 * 1024;
-    if (audioFile.size > maxSize) {
-      return NextResponse.json(
-        { success: false, error: '文件过大，请控制在 10MB 以内（约5分钟）' },
-        { status: 400 }
-      );
+    const bytes = await audioFile.arrayBuffer();
+    const format = formData.get('format') as string || '';
+    const sampleRate = parseInt(formData.get('sampleRate') as string || '16000', 10);
+
+    // ── 如果前端已转好 PCM，直接使用，跳过 ffmpeg ──
+    if (format === 'pcm' || audioFile.type === 'audio/pcm') {
+      console.log('[TranscribeXF] Received PCM directly, skipping conversion');
+      const pcmBuffer = Buffer.from(bytes);
+
+      try {
+        const result = await transcribeWithXf(
+          { appId: XF_APP_ID, apiKey: XF_API_KEY, apiSecret: XF_API_SECRET },
+          pcmBuffer,
+          sampleRate
+        );
+
+        if (!result.text || result.text.trim().length === 0) {
+          return NextResponse.json({ success: true, text: '', rawText: '' });
+        }
+
+        return NextResponse.json({
+          success: true,
+          text: result.labeledText || result.text,
+          rawText: result.text,
+          speakers: result.speakers,
+          hasSpeakers: result.hasSpeakers,
+        });
+      } catch (xfError: any) {
+        return NextResponse.json(
+          { success: false, error: '讯飞 ASR 失败: ' + (xfError.message || '未知') },
+          { status: 500 }
+        );
+      }
     }
 
-    // 保存临时文件
-    const bytes = await audioFile.arrayBuffer();
+    // ── 其他格式：尝试 ffmpeg 转换 ──
     const timestamp = Date.now();
     const inputPath = join(tmpdir(), `audio-xf-${timestamp}.webm`);
     const pcmPath = join(tmpdir(), `audio-xf-${timestamp}.pcm`);
-    
+
     await writeFile(inputPath, Buffer.from(bytes));
     console.log('[TranscribeXF] Saved to:', inputPath);
 
-    // 转换为 PCM 格式（讯飞要求）
     const converted = await convertToPcm(inputPath, pcmPath);
     if (!converted) {
       await unlink(inputPath).catch(() => {});
       return NextResponse.json(
-        { success: false, error: '音频格式转换失败，请检查是否安装了 ffmpeg' },
+        { success: false, error: '音频格式转换失败，请在本地安装 ffmpeg，或使用录音功能（无需 ffmpeg）' },
         { status: 500 }
       );
     }
 
-    console.log('[TranscribeXF] Converted to PCM');
+    console.log('[TranscribeXF] Converted to PCM via ffmpeg');
 
     try {
-      // 读取 PCM 数据
       const { readFile } = await import('fs/promises');
       const pcmBuffer = await readFile(pcmPath);
-      
-      // 调用讯飞 ASR
+
       const result = await transcribeWithXf(
         {
           appId: XF_APP_ID,

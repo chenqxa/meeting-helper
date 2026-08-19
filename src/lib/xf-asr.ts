@@ -29,14 +29,8 @@ export function getXfAuthUrl(config: XfConfig): string {
   const authorizationOrigin = `api_key="${config.apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
   const authorization = Buffer.from(authorizationOrigin).toString('base64');
   
-  // 4. 构建完整 URL
-  const params = new URLSearchParams({
-    authorization,
-    date,
-    host,
-  });
-  
-  return `wss://${host}${path}?${params.toString()}`;
+  // 4. 构建完整 URL（用 encodeURIComponent，不能用 URLSearchParams，后者空格编为 + 讯飞不认）
+  return `wss://${host}${path}?authorization=${encodeURIComponent(authorization)}&date=${encodeURIComponent(date)}&host=${encodeURIComponent(host)}`;
 }
 
 // 将音频数据转为讯飞要求的格式
@@ -125,9 +119,6 @@ export async function transcribeWithXf(
           accent: 'mandarin',
           dwa: 'wpgs',        // 动态修正
           ptt: 1,             // 添加标点
-          roleType: 1,        // 开启说话人分离（1=开启）
-          roleNum: 10,        // 最多识别10个说话人
-          rlang: 'zh-cn',     // 说话人语言
         },
         data: {
           status: 0,
@@ -209,7 +200,10 @@ export async function transcribeWithXf(
     
     ws.on('error', (err) => {
       console.error('[XfASR] WebSocket error:', err);
-      reject(new Error('ASR 连接错误'));
+      if (!isClosed) {
+        isClosed = true;
+        reject(new Error('ASR 连接错误: ' + (err.message || '无法连接到讯飞服务器，请检查网络和 API 密钥')));
+      }
     });
     
     ws.on('close', () => {
@@ -219,13 +213,16 @@ export async function transcribeWithXf(
       }
     });
     
-    // 超时处理（30秒）
+    // 超时：按音频大小动态计算（每帧40ms × 帧数 + 15s缓冲）
+    const frames = Math.ceil(audioBuffer.length / frameSize);
+    const timeoutMs = Math.max(60_000, frames * 40 + 15_000);
+    console.log(`[XfASR] Timeout set to ${Math.round(timeoutMs / 1000)}s for ${Math.round(audioBuffer.length / 32000)}s audio`);
     setTimeout(() => {
       if (!isClosed) {
         isClosed = true;
         ws.close();
         resolve(buildResult());
       }
-    }, 30000);
+    }, timeoutMs);
   });
 }

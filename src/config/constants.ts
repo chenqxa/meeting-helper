@@ -4,7 +4,7 @@ import { MeetingTemplate, MeetingType } from '@/types/meeting';
 export const MEETING_TEMPLATES: MeetingTemplate[] = [
   {
     id: 'weekly',
-    name: '周会',
+    name: '周例会',
     type: MeetingType.WEEKLY,
     description: '定期团队/部门周会，关注进度、问题与计划',
     summarySections: [

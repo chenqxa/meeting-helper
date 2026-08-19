@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDepartmentById, updateDepartment, deleteDepartment } from '@/storage/database/org-storage';
+import { getDepartmentById, updateDepartment, deleteDepartmentCascade } from '@/storage/database/org-storage';
 
 // GET /api/org/departments/[id] - 获取单个部门
 export async function GET(
@@ -57,13 +57,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const success = await deleteDepartment(id);
-    if (!success) {
-      return NextResponse.json(
-        { success: false, error: '删除失败：部门不存在或包含子部门/员工' },
-        { status: 400 }
-      );
-    }
+    await deleteDepartmentCascade(id);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('API Error:', error);

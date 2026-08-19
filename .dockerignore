@@ -2,7 +2,9 @@ node_modules
 .next
 .git
 .gitignore
+.env
 .env.local
+.env.development
 .env.development.local
 .env.test.local
 .env.production.local
@@ -11,3 +13,12 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 *.tsbuildinfo
+*.tar
+*.log
+*.pdf
+*.docx
+temp-*
+meetings-data.json
+org-data.json
+debug-meeting.json
+base-data.json

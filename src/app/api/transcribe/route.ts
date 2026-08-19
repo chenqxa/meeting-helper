@@ -8,7 +8,8 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 const SILICONFLOW_API_KEY = process.env.SILICONFLOW_API_KEY;
-const SILICONFLOW_BASE_URL = process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn';
+// 去掉末尾的 /v1（避免与路径拼接重复）
+const SILICONFLOW_BASE_URL = (process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn').replace(/\/v1\/?$/, '');
 
 // 将音频转换为 MP3 格式（如果 ffmpeg 可用）
 async function convertToMp3(inputPath: string, outputPath: string): Promise<boolean> {
@@ -64,12 +65,14 @@ export async function POST(request: NextRequest) {
     // 尝试转换为 MP3（如果 ffmpeg 可用）
     let uploadPath = inputPath;
     let uploadMimeType = audioFile.type || 'audio/webm';
-    
+
     const converted = await convertToMp3(inputPath, mp3Path);
     if (converted) {
       uploadPath = mp3Path;
       uploadMimeType = 'audio/mpeg';
       console.log('[Transcribe] Converted to MP3');
+    } else {
+      console.log('[Transcribe] FFmpeg not available, using original format');
     }
 
     try {
@@ -81,9 +84,10 @@ export async function POST(request: NextRequest) {
       apiFormData.append('file', new Blob([fileBuffer], { type: uploadMimeType }), 'audio.mp3');
       apiFormData.append('model', 'FunAudioLLM/SenseVoiceSmall');
       
-      console.log('[Transcribe] Calling API:', `${SILICONFLOW_BASE_URL}/v1/audio/transcriptions`);
+      const asrUrl = `${SILICONFLOW_BASE_URL}/v1/audio/transcriptions`;
+      console.log('[Transcribe] Calling API:', asrUrl);
       
-      const response = await fetch(`${SILICONFLOW_BASE_URL}/v1/audio/transcriptions`, {
+      const response = await fetch(asrUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${SILICONFLOW_API_KEY}`,

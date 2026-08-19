@@ -36,7 +36,8 @@ export class MeetingProcessor {
     originalText: string,
     meetingTitle: string,
     meetingDate: string,
-    options: ProcessingOptions = {}
+    options: ProcessingOptions = {},
+    participants?: string[]
   ): Promise<ProcessedMeeting> {
     const startTime = Date.now();
 
@@ -72,7 +73,7 @@ export class MeetingProcessor {
       segments = await TextSegmenter.segmentText(cleanedText);
     }
 
-    // Step 3: Summary generation
+    // Step 3 & 4: Summary + Action Items in PARALLEL (saves ~50% time)
     let summary: StructuredSummary = {
       title: meetingTitle,
       overview: '',
@@ -84,21 +85,24 @@ export class MeetingProcessor {
       meetingDate,
       estimatedDuration: '0m'
     };
-    
+    let actionItems: ExtractionResult = { actionItems: [], metadata: { totalItems: 0, byPriority: {}, byAssignee: {}, byCategory: {}, confidence: 0 } };
+
+    const tasks: Promise<void>[] = [];
     if (opts.enableSummary) {
-      summary = await SummaryGenerator.generateSummary(
-        segments.segments,
-        meetingTitle,
-        meetingDate
+      tasks.push(
+        SummaryGenerator.generateSummary(segments.segments, meetingTitle, meetingDate)
+          .then(r => { summary = r; })
+          .catch(e => { console.error('[MeetingProcessor] Summary generation failed:', e); })
       );
     }
-
-    // Step 4: Action item extraction
-    let actionItems: ExtractionResult = { actionItems: [], metadata: { totalItems: 0, byPriority: {}, byAssignee: {}, byCategory: {}, confidence: 0 } };
-    
     if (opts.enableActionExtraction) {
-      actionItems = await ActionExtractor.extractActionItems(segments.segments);
+      tasks.push(
+        ActionExtractor.extractActionItems(segments.segments, participants)
+          .then(r => { actionItems = r; })
+          .catch(e => { console.error('[MeetingProcessor] Action extraction failed:', e); })
+      );
     }
+    await Promise.all(tasks);
 
     const processingTime = Date.now() - startTime;
 

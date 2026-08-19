@@ -41,49 +41,49 @@ interface RawActionItem {
   source_sentence: string;
 }
 
-const SYSTEM_PROMPT = `你是专业的会议纪要解析助手，只负责从会议文本中提取「待执行的行动项」。
+const SYSTEM_PROMPT = `你是专业的会议纪要解析助手，从会议文本中提取关键行动项。
 
-【核心规则】
-1. 只提取【未完成、需要执行】的事项。以下内容必须忽略：
-   - 已完成的工作汇报（如"需求文档已经完成了"、"发了三篇文章"）
-   - 纯背景描述、进度回顾
-   - 讨论过程中的提问和回应
-2. 行动项的判断标准：有明确的「要做什么」+「谁来做」或「什么时候做」。
-3. 输出严格为JSON数组，不允许额外解释、不允许Markdown代码块。
+【核心原则】追求精准、可读、高质量，不追求数量。
 
-【负责人识别规则 - 重要】
-- 如果文本中有姓名（如"张三"），直接使用姓名
-- 如果文本中只有部门/角色（如"研发"、"市场"、"产品"、"设计"），使用部门名称作为owner
-- 如果文本中只有"说话人1"/"说话人2"等标记，需根据上下文推断其角色或部门
-- 通过对话上下文推断：如"研发呢？"后面的回答者就是研发部门的人
-- 通过任务分配语境推断：如"你提前找个测试人员"中的"你"指的是上文正在汇报的角色
+【提取规则】
+1. 只提取【有实际价值的待办事项】，忽略：已完成的汇报、纯背景描述、讨论中的提问。
+2. 合并同类项：相关联的小任务合并成一个有意义的行动项。例如"添加筛选功能"和"添加物料筛选"合并为"各业务模块增加筛选功能"。
+3. 提炼概括：不要照搬原文碎片，用简洁专业的语言概括任务目标和方向。
+4. 数量控制：根据会议内容自然输出，不必凑数，最多不超过20条。只保留有明确方向和价值的事项。
+5. 每条行动项必须让不参会的人也能看懂。
 
-【优先级规则】
-- high: 有明确且紧迫的截止时间（如"明天"、"四月三号前"），或涉及线上风险
-- medium: 有截止时间但不紧迫（如"四月八号"、"下周"），或常规事项
-- low: 无明确时间要求（如"有空看看"、"后续考虑"）
+【负责人识别】
+- 优先用姓名（如"张三"），没有姓名用部门/角色（如"研发"、"市场"）
+- 多人协作的写主要负责人/方向（如"信息化/销售"）
+- 通过上下文推断说话人身份
 
-【置信度规则】
-- confidence_owner: 明确姓名1.0，明确部门/角色0.8~0.9，上下文推断0.5~0.7，无法识别0.0
-- confidence_date: 明确日期1.0，模糊相对时间0.7~0.9，非常模糊0.3~0.6，无日期0.0
+【优先级】
+- high: 有紧迫截止时间或涉及线上风险
+- medium: 有时间要求但不紧迫，或常规推进事项
+- low: 无明确时间，后续规划
 
-【输出格式】严格JSON数组：
+【置信度】
+- confidence_owner: 明确姓名1.0，部门/角色0.8~0.9，推断0.5~0.7，无0.0
+- confidence_date: 明确日期1.0，模糊时间0.7~0.9，无0.0
+
+【输出格式】严格JSON数组，不要任何额外文字：
 [
   {
-    "description": "任务内容，动词开头，简洁明确，不超过80字",
-    "owner": "负责人姓名或部门角色（如'研发'、'市场'），无法识别时为null",
-    "due_date": "截止日期YYYY-MM-DD，无法识别时为null",
+    "description": "任务内容，动词开头，简洁专业，不超过50字",
+    "owner": "负责人姓名或部门（如'信息化/销售'），无法识别为null",
+    "due_date": "截止日期，必须为YYYY-MM-DD格式。所有时间信息（如'6月25日前'→2026-06-25、'下周五'→计算具体日期、'月底'→当月最后一天）都必须转换为此字段，不要放到其他字段。无法推断为null",
     "priority": "high|medium|low",
-    "initial_result": "预期完成标准或交付物（根据上下文推断），无法推断则为null",
+    "initial_result": "预期交付物或成果（如'需求文档初稿'、'系统上线可演示'），仅描述交付物，不含时间，无法推断为null",
     "confidence_owner": 0.0,
     "confidence_date": 0.0,
-    "source_sentence": "行动项来源的原文句子（逐字摘录）"
+    "source_sentence": "关键来源原文"
   }
 ]`;
 
 export class ActionExtractor {
   static async extractActionItems(
-    segments: Array<{ content: string; speaker?: string; timestamp?: string }>
+    segments: Array<{ content: string; speaker?: string; timestamp?: string }>,
+    participants?: string[]
   ): Promise<ExtractionResult> {
     const fullText = segments.map(s => {
       if (s.speaker) return `[${s.speaker}]: ${s.content}`;
@@ -91,10 +91,13 @@ export class ActionExtractor {
     }).join('\n');
 
     const today = new Date().toISOString().split('T')[0];
-    const userPrompt = `今天日期：${today}
+    const participantHint = participants && participants.length > 0
+      ? `\n- 参会人员：${participants.join('、')}\n  请尽量将行动项的负责人匹配到以上具体人名，而不是笼统的部门名。`
+      : '';
+    const userPrompt = `今天日期：${today}${participantHint}
 
 ## 会议转写文本
-${fullText.substring(0, 6000)}
+${fullText.substring(0, 12000)}
 
 请从以上文本中提取所有行动项，严格按JSON数组格式输出，不需要任何说明文字。`;
 
@@ -111,22 +114,42 @@ ${fullText.substring(0, 6000)}
       rawItems = [];
     }
 
-    const actionItems: ActionItem[] = rawItems.map((item, index) => ({
-      id: `action-${index + 1}`,
-      description: item.description || '待明确',
-      assignee: item.owner ?? undefined,
-      dueDate: item.due_date ?? undefined,
-      priority: (['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium') as ActionItem['priority'],
-      status: 'pending',
-      initialResult: item.initial_result ?? undefined,
-      confidence: {
-        assignee: item.confidence_owner ?? (item.owner ? 0.8 : 0.1),
-        dueDate: item.confidence_date ?? (item.due_date ? 0.8 : 0.1),
-        priority: 0.7,
-      },
-      sourceText: item.source_sentence || '',
-      category: inferCategory(item.description),
-    }));
+    const actionItems: ActionItem[] = rawItems.map((item, index) => {
+      let dueDate = item.due_date ?? undefined;
+      const dateSource = dueDate ? null : [item.initial_result, item.description, item.source_sentence].find(s => {
+        if (!s) return false;
+        return /\d{1,2}月\d{1,2}|月底|下[周月]|\d{4}年\d{1,2}月|\d{1,2}[\/\-]\d{1,2}/.test(s);
+      });
+      if (!dueDate && dateSource) {
+        const m = dateSource.match(/(\d{4})[年/\-.](\d{1,2})[月/\-.](\d{1,2})/);
+        if (m) {
+          dueDate = `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+        }
+      }
+      if (!dueDate && dateSource) {
+        const m = dateSource.match(/(\d{1,2})[月/\-.](\d{1,2})/);
+        if (m) {
+          const y = new Date().getFullYear();
+          dueDate = `${y}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+        }
+      }
+      return {
+        id: `action-${index + 1}`,
+        description: item.description || '待明确',
+        assignee: item.owner ?? undefined,
+        dueDate,
+        priority: (['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium') as ActionItem['priority'],
+        status: 'pending',
+        initialResult: item.initial_result ?? undefined,
+        confidence: {
+          assignee: item.confidence_owner ?? (item.owner ? 0.8 : 0.1),
+          dueDate: item.confidence_date ?? (dueDate ? 0.7 : 0.1),
+          priority: 0.7,
+        },
+        sourceText: item.source_sentence || '',
+        category: inferCategory(item.description),
+      };
+    });
 
     return { actionItems, metadata: calcMetadata(actionItems) };
   }

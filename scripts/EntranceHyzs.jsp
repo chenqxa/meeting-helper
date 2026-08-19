@@ -1,0 +1,37 @@
+<%@ page contentType="text/html;charset=UTF-8" %>
+<%@ page import="weaver.hrm.*" %>
+<%@ page import="javax.crypto.Mac" %>
+<%@ page import="javax.crypto.spec.SecretKeySpec" %>
+<%@ page import="java.util.Base64" %>
+<%
+// 会议纪要助手 - OA 单点跳转入口
+// 放到 OA 服务器 ecology/interface/ 目录
+// 菜单链接: /interface/EntranceHyzs.jsp
+User user = HrmUserVarify.getUser(request, response);
+if (user == null) {
+    response.sendRedirect(request.getContextPath() + "/login/Login.jsp");
+    return;
+}
+String loginid = user.getLoginid();
+// 会议助手 SSO 回调地址（如有内网地址可换）
+String targetUrl = "https://hjoa.chinahy-soft.com:15815/api/auth/weaver/callback?redirect=/";
+
+// 必须与会议助手 .env 中 WEAVER_SSO_HMAC_SECRET 完全一致
+String secret = "REDACTED_WEAVER_SSO_HMAC_SECRET";
+long ts = System.currentTimeMillis();
+String data = loginid + "|" + ts;
+String sign = "";
+try {
+    Mac mac = Mac.getInstance("HmacSHA256");
+    mac.init(new SecretKeySpec(secret.getBytes("UTF-8"), "HmacSHA256"));
+    byte[] hmac = mac.doFinal(data.getBytes("UTF-8"));
+    sign = Base64.getEncoder().encodeToString(hmac);
+} catch (Exception e) {
+    response.sendError(500, "签名生成失败");
+    return;
+}
+String sep = targetUrl.contains("?") ? "&" : "?";
+String url = targetUrl + sep + "username=" + java.net.URLEncoder.encode(loginid, "UTF-8")
+    + "&timestamp=" + ts + "&sign=" + java.net.URLEncoder.encode(sign, "UTF-8");
+response.sendRedirect(url);
+%>

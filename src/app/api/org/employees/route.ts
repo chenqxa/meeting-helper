@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 import { createEmployee, getEmployees } from '@/storage/database/org-storage';
 
 // GET /api/org/employees - 获取员工列表
@@ -20,6 +21,8 @@ export async function GET(request: Request) {
 // POST /api/org/employees - 创建员工
 export async function POST(request: NextRequest) {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await request.json();
     const { name, code, position, departmentId, email, phone, managerId, status = 'active', joinedAt } = body;
 

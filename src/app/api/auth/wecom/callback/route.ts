@@ -2,6 +2,35 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createSessionToken } from '@/lib/session';
 import { getTraceFromRequest } from '@/lib/trace';
 
+// 企微 userid/姓名 → OA loginid（session 身份统一走 OA 体系）
+// 1) 按 OA loginid = 企微 userid 直接等值（多数企业两边一致时最快）
+// 2) 按姓名lastname 精确反查 HrmResource.loginid
+// 3) 都失败回退企微 userid（保持旧行为，至少页面能进）
+async function resolveOALoginId(wecomUserid: string, name: string): Promise<string> {
+  try {
+    const { getAppPool } = await import('@/lib/oa-task-push');
+    const pool = await getAppPool();
+    const linked = process.env.OA_LINKED_SERVER || 'FWsv';
+    const oaDb = process.env.OA_DATABASE_NAME || 'ecology';
+    const esc = (v: string) => v.replace(/'/g, "''");
+
+    // loginid 等值 或 姓名匹配（loginid=userid 的企业一次命中；否则按姓名）
+    const res = await pool.request().query(`
+      SELECT TOP 1 loginid FROM [${linked}].[${oaDb}].[dbo].[HrmResource]
+      WHERE (loginid = '${esc(wecomUserid)}' OR lastname = N'${esc(name)}') AND status = 1
+      ORDER BY CASE WHEN loginid = '${esc(wecomUserid)}' THEN 0 ELSE 1 END
+    `);
+    const oaLoginid = res.recordset[0]?.loginid;
+    if (oaLoginid) {
+      console.log(`[WeComAuth] 身份映射 企微:${wecomUserid}/姓名:${name} → OA loginid:${oaLoginid}`);
+      return oaLoginid;
+    }
+  } catch (e) {
+    console.warn('[WeComAuth] OA loginid 反查失败，回退企微 userid:', e instanceof Error ? e.message : e);
+  }
+  return wecomUserid;
+}
+
 /**
  * 企业微信OAuth回调
  * GET /api/auth/wecom/callback?code=xxx&state=xxx
@@ -100,7 +129,9 @@ export async function GET(request: NextRequest) {
     const dept = detailData.department || '';
 
     // 4. 创建session并登录
-    const session = await createSessionToken({ loginid: userid, name, dept });
+    // session.loginid 统一用 OA loginid（如 chenqiaoxia），而非企微 userid（如 xibo）：
+    // "我的任务"按 ownerLoginId 匹配、角色权限按 loginid 查表，用企微 userid 会全部断链
+    const session = await createSessionToken({ loginid: await resolveOALoginId(userid, name), name, dept });
 
     // 5. 跳转到原始页面
     const redirectUrl = state || '/';

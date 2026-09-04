@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { executeOaPullResults } from '@/lib/oa-pull-runner';
+import { getOaPullConfig } from '@/storage/database/oa-pull-config-storage';
 
 // POST /api/oa/pull-results
 // 从 uf_meetingplan 拉取 OA 用户填写的完成结果（wcjgsm/wcqkfj），同步回行动项
 // body 可选：{ cursorAt: '2026-08-01T00:00:00Z' } 增量同步时只拉该时间之后修改的记录
 export async function POST(request: NextRequest) {
+  // OA 回拉停用状态下拒绝调用（填报已转系统内完成）
+  const cfg = await getOaPullConfig();
+  if (!cfg.enabled) {
+    return NextResponse.json({ success: false, error: 'OA 回拉已停用' }, { status: 400 });
+  }
   const body = await request.json().catch(() => ({}));
   const cursorAt = typeof body.cursorAt === 'string' && body.cursorAt ? body.cursorAt : null;
 

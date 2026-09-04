@@ -96,11 +96,12 @@ export default function OaSyncPage() {
           </div>
           <button
             onClick={runOaPullNow}
-            disabled={running}
-            className="flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-colors"
+            disabled={running || !oaPull?.enabled}
+            title={oaPull?.enabled ? undefined : 'OA 回拉已停用（填报已在系统内完成），如需恢复请先在下方调度设置中开启开关'}
+            className="flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-xl transition-colors"
           >
             <RefreshCw className={`w-4 h-4 ${running ? 'animate-spin' : ''}`} />
-            {running ? '同步中…' : '立即回拉'}
+            {running ? '同步中…' : oaPull?.enabled ? '立即回拉' : '回拉已停用'}
           </button>
         </div>
 

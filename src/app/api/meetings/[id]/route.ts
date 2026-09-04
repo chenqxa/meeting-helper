@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getMeetingById, deleteMeeting, updateMeeting, createActionItem, getAllActionItems } from '@/storage';
 import { getAppPool, deleteOATasksByMeetingId } from '@/lib/oa-task-push';
-import { deleteActionItemsByMeetingId, updateActionItem } from '@/storage/database/action-storage';
+import { deleteActionItemsByMeetingId, updateActionItem, getActionItemByMeetingAndOriginalId } from '@/storage/database/action-storage';
 import { resolveActionOwnerIdentity, resolveDeptByName } from '@/lib/action-owner';
 import { getTraceFromRequest } from '@/lib/trace';
 import * as sql from 'mssql';
 
-// 同步行动项到数据库（插入新的、更新已有的、删除缺失的）
-async function syncActionItemsToDatabase(meetingId: string, actionItems: any[]) {
+// 同步行动项到数据库（插入新的、更新已有的；删除仅显式允许时执行，且为软取消）
+async function syncActionItemsToDatabase(meetingId: string, actionItems: any[], opts?: { allowRemove?: boolean }) {
   // 获取数据库中现有的行动项
   const existingItems = await getAllActionItems({ meetingId });
   const existingMap = new Map(existingItems.map(item => [item.originalId || item.id, item]));
@@ -90,13 +90,23 @@ async function syncActionItemsToDatabase(meetingId: string, actionItems: any[]) 
     }
   }
 
-  // 删除不在新列表中的行动项（用户删除了）
-  for (const existingItem of existingItems) {
-    const originalId = existingItem.originalId || existingItem.id;
-    if (!currentIds.has(originalId)) {
-      const { deleteActionItem } = await import('@/storage/database/action-storage');
-      await deleteActionItem(existingItem.id);
-      console.log(`[sync] 删除行动项: ${existingItem.id} (${originalId})`);
+  // 删除不在新列表中的行动项：改为软取消（与手动删除口径一致，台账留痕可追溯）。
+  // 仅显式 allowRemove 时执行；纪要派生/负责人匹配等"部分字段同步"路径绝不删除，
+  // 防止误删手动维护的台账行（历史"归档后行动项消失"的根因）。
+  if (opts?.allowRemove) {
+    for (const existingItem of existingItems) {
+      const originalId = existingItem.originalId || existingItem.id;
+      if (!currentIds.has(originalId)) {
+        try {
+          await updateActionItem(existingItem.id, {
+            status: 'cancelled',
+            completionNote: '同步时不在最新列表中，已自动取消（台账留痕）',
+          } as any);
+          console.log(`[sync] 软取消行动项: ${existingItem.id} (${originalId})`);
+        } catch (e) {
+          console.warn(`[sync] 软取消失败: ${existingItem.id}`, e instanceof Error ? e.message : e);
+        }
+      }
     }
   }
 
@@ -235,8 +245,11 @@ export async function GET(
       const proposer = dbItem?.proposer ?? legacy?.proposer ?? null;
       const proposerLoginId = dbItem?.proposerLoginId ?? legacy?.proposerLoginId ?? null;
       const proposerOaId = dbItem?.proposerOaId ?? legacy?.proposerOaId ?? null;
+      const proposerDept = dbItem?.proposerDept ?? legacy?.proposerDept ?? legacy?.proposer_dept ?? null;
       const dueDate = dbItem?.dueDate ?? legacy?.dueDate ?? legacy?.due_date ?? null;
       const dueDateType = dbItem?.dueDateType ?? legacy?.dueDateType ?? legacy?.due_date_type ?? (dueDate ? 'date' : 'tbd');
+      // 数据自愈：有日期但被误标为 tbd 的，按 date 处理（历史新增对话框缺陷遗留）
+      const effectiveDueDateType = dueDate && dueDateType === 'tbd' ? 'date' : dueDateType;
       const priority = dbItem?.priority ?? legacy?.priority ?? 'medium';
       const status = dbItem?.status ?? legacy?.status ?? 'pending';
       const confidenceOwner =
@@ -262,9 +275,10 @@ export async function GET(
         proposer,
         proposerLoginId,
         proposerOaId,
+        proposerDept,
         dueDate,
         due_date: dueDate,
-        due_date_type: dueDateType,
+        due_date_type: effectiveDueDateType,
         priority,
         status,
         confidence: {
@@ -299,21 +313,26 @@ export async function GET(
     const legacyItems = Array.isArray(meeting.actionItems) ? meeting.actionItems : [];
     const merged: any[] = [];
 
-    // 如果数据库中有行动项数据，优先使用数据库（尊重用户的删除和修改操作）
-    if (dbActionItems.length > 0) {
-      // 只显示数据库中存在的行动项
-      for (const dbItem of dbActionItems) {
-        // 尝试找到对应的legacy数据用于补充字段
-        const legacy = legacyItems.find(item =>
-          item.id === dbItem.originalId || item.id === dbItem.id
-        );
-        merged.push(mergeItem(legacy ?? null, dbItem));
-      }
-    } else {
-      // 数据库中没有数据时，使用会议JSON中的数据（兜底）
-      for (const legacy of legacyItems) {
-        merged.push(mergeItem(legacy, null));
-      }
+    // 并集合并：台账为主（cancelled 已被存储层过滤，已删项不会复活），
+    // JSON 独有项（历史双写分歧遗留）补入，保证加载即可见；首次编辑时惰性回填台账
+    for (const dbItem of dbActionItems) {
+      // 尝试找到对应的legacy数据用于补充字段
+      const legacy = legacyItems.find(item =>
+        item.id === dbItem.originalId || item.id === dbItem.id
+      );
+      merged.push(mergeItem(legacy ?? null, dbItem));
+    }
+    const matchedJsonIds = new Set<string>(
+      dbActionItems.flatMap(dbItem => [dbItem.originalId, dbItem.id].filter(Boolean) as string[])
+    );
+    let unionBackfilled = 0;
+    for (const legacy of legacyItems) {
+      if (!legacy || !legacy.id || matchedJsonIds.has(legacy.id)) continue;
+      unionBackfilled++;
+      merged.push(mergeItem(legacy, null));
+    }
+    if (unionBackfilled > 0) {
+      console.log(`[GET merge] meeting=${meetingId} 补入 ${unionBackfilled} 条 JSON 独有行动项（首次编辑时回填台账）`);
     }
 
     return NextResponse.json({
@@ -350,56 +369,67 @@ export async function PATCH(
       if (!current) {
         return NextResponse.json({ success: false, error: 'Meeting not found' }, { status: 404 });
       }
+      const input = body.addActionItem;
+      // 客户端临时 id 作为 originalId：前端行 key 保持稳定，后续 PUT/DELETE 均可通过它定位台账行
+      const originalId: string = (typeof input.id === 'string' && input.id.trim()) || `rd-${Date.now()}`;
       const resolvedOwner = await resolveActionOwnerIdentity({
-        owner: body.addActionItem.assignee || body.addActionItem.owner || null,
-        ownerLoginId: body.addActionItem.ownerLoginId || null,
-        ownerOaId: body.addActionItem.ownerOaId || null,
-        dept: body.addActionItem.dept || null,
+        owner: input.assignee || input.owner || null,
+        ownerLoginId: input.ownerLoginId || null,
+        ownerOaId: input.ownerOaId || null,
+        dept: input.dept || null,
       });
       const newItem = {
-        ...body.addActionItem,
-        assignee: resolvedOwner.owner || body.addActionItem.assignee || body.addActionItem.owner || null,
-        owner: resolvedOwner.owner || body.addActionItem.owner || body.addActionItem.assignee || null,
+        ...input,
+        assignee: resolvedOwner.owner || input.assignee || input.owner || null,
+        owner: resolvedOwner.owner || input.owner || input.assignee || null,
         ownerLoginId: resolvedOwner.ownerLoginId,
         ownerOaId: resolvedOwner.ownerOaId,
-        dept: resolvedOwner.dept || body.addActionItem.dept || null,
-        id: `rd-${Date.now()}`,
+        dept: resolvedOwner.dept || input.dept || null,
+        id: originalId,
         created_at: new Date().toISOString(),
       };
 
-      // 使用事务确保数据一致性
       try {
-        const items = [...(current.actionItems || []), newItem];
-
-        // 1. 更新会议表
-        const updated = await updateMeeting(meetingId, { actionItems: items });
-
-        // 2. 写入行动项表（必须成功，否则回滚）
-        const createdItem = await createActionItem({
+        // 1. 幂等检查 + 先写台账（主数据源）：按 originalId 查重防重试重复行；
+        //    台账写失败直接报错，前端保留临时行提示重试，不再产生"仅在 JSON"的孤儿项
+        const existed = await getActionItemByMeetingAndOriginalId(meetingId, originalId);
+        const dbItem = existed ?? await createActionItem({
           meetingId,
-          originalId: newItem.id,
+          originalId,
           description: newItem.description || '',
-          owner: newItem.assignee || newItem.owner || null,
-          ownerLoginId: newItem.ownerLoginId || null,
-          ownerOaId: newItem.ownerOaId || null,
-          dept: newItem.dept || null,
-          proposer: (newItem as any).proposer || null,
-          proposerLoginId: (newItem as any).proposerLoginId || null,
-          proposerOaId: (newItem as any).proposerOaId || null,
+          owner: resolvedOwner.owner,
+          ownerLoginId: resolvedOwner.ownerLoginId,
+          ownerOaId: resolvedOwner.ownerOaId,
+          dept: resolvedOwner.dept,
+          // 提出/责任人姓名 trim：手输易带首尾空格，导致部门精确匹配失败
+          proposer: ((input as any).proposer || '').trim() || null,
+          proposerLoginId: ((input as any).proposerLoginId || '').trim() || null,
+          proposerOaId: ((input as any).proposerOaId || '').trim() || null,
+          proposerDept: ((input as any).proposerDept || '').trim() || null,
           dueDate: newItem.dueDate || newItem.due_date || null,
-          dueDateType: (newItem as any).due_date_type || ((newItem.dueDate || newItem.due_date) ? 'date' : 'tbd'),
+          // 类型兜底：未显式指定时按有无日期判定（防新增项先算出 tbd 后填日期被固化）
+          dueDateType: (input as any).due_date_type || (newItem.dueDate || newItem.due_date ? 'date' : 'tbd'),
           priority: newItem.priority || 'medium',
-          status: 'pending',
-          sourceText: newItem.sourceText || (newItem as any).source_sentence || null,
-          confidenceOwner: newItem.confidence?.assignee ?? newItem.confidence_owner ?? null,
-          confidenceDate: newItem.confidence?.dueDate ?? newItem.confidence_date ?? null,
-          reassignedFrom: (newItem as any).reassigned_from || null,
-        });
+          status: input.status || 'confirmed',
+          sourceText: newItem.sourceText || (input as any).source_sentence || null,
+          confidenceOwner: (newItem as any).confidence?.assignee ?? (newItem as any).confidence_owner ?? null,
+          confidenceDate: (newItem as any).confidence?.dueDate ?? (newItem as any).confidence_date ?? null,
+          reassignedFrom: (input as any).reassigned_from || null,
+        } as any);
+
+        // 2. 台账成功后再写会议 JSON：失败仅告警不回滚（GET 以台账为主并集，不影响展示）
+        let updated: any = current;
+        try {
+          const items = [...(current.actionItems || []), newItem];
+          updated = await updateMeeting(meetingId, { actionItems: items });
+        } catch (e) {
+          console.warn('[PATCH addActionItem] 会议 JSON 更新失败（台账已写入，不影响展示）:', e instanceof Error ? e.message : e);
+        }
 
         // 2.1 若为重新派发：给原 X 项写入反向关联（reassigned_to），与独立任务重派口径一致
-        if ((newItem as any).reassigned_from) {
+        if ((input as any).reassigned_from) {
           try {
-            await updateActionItem((newItem as any).reassigned_from, { reassignedTo: createdItem.id } as any);
+            await updateActionItem((input as any).reassigned_from, { reassignedTo: dbItem.id } as any);
           } catch (e) {
             console.warn('[PATCH addActionItem] 写回原项 reassigned_to 失败:', e instanceof Error ? e.message : e);
           }
@@ -432,9 +462,10 @@ export async function PATCH(
           }
         }
 
-        return NextResponse.json({ success: true, data: updated, oaPush: oaPushResult });
+        // createdAction：单条返回，前端只替换对应临时行（不整表替换，防行重挂载/焦点丢失）
+        return NextResponse.json({ success: true, data: updated, createdAction: dbItem, oaPush: oaPushResult });
       } catch (error) {
-        console.error('[PATCH addActionItem] 操作失败:', error);
+        console.error('[PATCH addActionItem] 台账写入失败:', error);
         return NextResponse.json(
           { success: false, error: error instanceof Error ? error.message : '添加行动项失败' },
           { status: 500 }
@@ -442,40 +473,126 @@ export async function PATCH(
       }
     }
 
-    // 如果更新了纪要，自动派生摘要和行动项（保留已有 due_date、状态等手动字段）
+    // 乐观锁：纪要保存携带 base_updated_at 与服务端不一致 → 409 让前端确认后决定是否覆盖
+    if (body.base_updated_at && body.minutes) {
+      const cur = await getMeetingById(meetingId);
+      const curUpdatedAt = (cur as any)?.updatedAt ?? (cur as any)?.updated_at;
+      if (cur && curUpdatedAt && curUpdatedAt !== body.base_updated_at) {
+        return NextResponse.json(
+          { success: false, conflict: true, error: '会议已被他人修改，请确认后再保存', current_updated_at: curUpdatedAt },
+          { status: 409 }
+        );
+      }
+    }
+    delete body.base_updated_at;
+
+    // 如果更新了纪要，自动派生摘要和行动项（手动项永不丢失：匹配的合并、手动项保留、纯派生零编辑项随表格移除）
     let derivedData: { summary?: any; actionItems?: any[] } = {};
     if (body.minutes) {
       const { deriveSummary, deriveActionItems } = await import('@/lib/minutes-derive');
       const summary = deriveSummary(body.minutes);
       const fresh = deriveActionItems(body.minutes);
 
-      // 读取当前已存储的 actionItems，按描述相似度合并手动设置的字段
       const current = await getMeetingById(meetingId);
-      const existing: any[] = (current?.actionItems || []);
-      const PRESERVE = ['due_date','dueDate','status','ownerLoginId','ownerOaId','dept',
-        'oa_result','oa_result_at','oa_score','oa_auto_detected','confirmed_by','confirmed_at'];
-      const actionItems = fresh.map((item, i) => {
-        // 按序号匹配，否则按描述前30字匹配
-        const match = existing[i] || existing.find((e: any) =>
+      const dbRows = await getAllActionItems({ meetingId }).catch(() => [] as Awaited<ReturnType<typeof getAllActionItems>>);
+
+      // 现有项 = 会议 JSON ∪ 台账（台账独有行也参与保留判定，防止"台账有、JSON 无"的项在保存纪要后被清掉）
+      const existing: any[] = [...(current?.actionItems || [])];
+      const knownIds = new Set(existing.map((e: any) => String(e.id)));
+      for (const row of dbRows) {
+        const key = String(row.originalId || row.id);
+        if (!knownIds.has(key)) {
+          knownIds.add(key);
+          existing.push({
+            id: key,
+            description: row.description,
+            owner: row.owner, assignee: row.owner,
+            ownerLoginId: row.ownerLoginId, ownerOaId: row.ownerOaId, dept: row.dept,
+            proposer: row.proposer, proposerLoginId: row.proposerLoginId, proposerOaId: row.proposerOaId,
+            due_date: row.dueDate, dueDate: row.dueDate,
+            due_date_type: row.dueDateType, dueDateType: row.dueDateType,
+            priority: row.priority, status: row.status,
+            confirmed_by: row.confirmedBy, completed_by: row.completedBy,
+            oa_result: row.oaResult, oa_score: row.oaScore,
+          });
+        }
+      }
+
+      // 派生时保留的手动维护字段（派生值不覆盖手动值）
+      const PRESERVE = ['due_date_type', 'dueDateType', 'status', 'ownerLoginId', 'ownerOaId', 'dept',
+        'proposer', 'proposerLoginId', 'proposerOaId', 'proposerDept', 'proposer_dept', 'priority',
+        'oa_result', 'oa_result_at', 'oa_score', 'oa_auto_detected', 'confirmed_by', 'confirmed_at',
+        'completed_by', 'completed_at', 'completion_note', 'evidence_files',
+        'block_reason', 'blocked_by', 'blocked_at'];
+
+      // 判定"被手动维护过"：任一手动字段有值，或状态流转过（派生默认 pending/medium/无负责人）
+      const isManuallyTouched = (it: any) => Boolean(
+        it.owner || it.assignee || it.ownerLoginId || it.ownerOaId ||
+        it.proposer || it.proposerLoginId || it.proposerOaId ||
+        it.due_date || it.dueDate ||
+        (it.priority && it.priority !== 'medium') ||
+        (it.status && it.status !== 'pending') ||
+        it.oa_result != null || it.oa_score != null ||
+        it.confirmed_by || it.completed_by || it.block_reason || it.blocked_by
+      );
+
+      const consumed = new Set<string>();
+      const actionItems: any[] = fresh.map((item: any) => {
+        // 匹配顺序：① 描述前30字（覆盖表格重排/删行后 action-N 重编号）② id 精确相等（覆盖改了行文字的派生行）。
+        // 不做按序号兜底——会把手动项错配给表格行，导致手动项被"吞并"后消失（历史 bug 变体）
+        let match = existing.find((e: any) => !consumed.has(String(e.id)) &&
           e.description && item.description &&
           e.description.slice(0, 30) === item.description.slice(0, 30));
+        if (!match) {
+          match = existing.find((e: any) => !consumed.has(String(e.id)) && String(e.id) === String(item.id));
+        }
         if (!match) return item;
-        const merged: any = { ...item };
+        consumed.add(String(match.id));
+        // 沿用现有项 id（= 台账 originalId），保证保存纪要后行动项 id/React key 稳定
+        const merged: any = { ...item, id: match.id };
         for (const k of PRESERVE) {
           if (match[k] !== undefined && match[k] !== null) merged[k] = match[k];
         }
-        // 若纪要 actionTable 里该行没有填负责人，保留之前手动设置的
+        // 表格为空的责任人/日期/描述：保留现有手动值（表格有值则以表格为准）
         if (!merged.owner && !merged.assignee) {
           if (match.owner) { merged.owner = match.owner; merged.assignee = match.owner; }
           else if (match.assignee) { merged.owner = match.assignee; merged.assignee = match.assignee; }
         }
+        if (!merged.dueDate && !merged.due_date && (match.dueDate || match.due_date)) {
+          merged.dueDate = match.dueDate || match.due_date;
+          merged.due_date = merged.dueDate;
+        }
+        if (!merged.description && match.description) merged.description = match.description;
         return merged;
       });
+
+      // 未匹配的现有项：手动维护过的一律保留；纯派生（action-N）且零编辑的视为"已从表格移除"→ 软取消台账行
+      let removedCount = 0, keptCount = 0;
+      for (const e of existing) {
+        if (consumed.has(String(e.id))) continue;
+        if (isManuallyTouched(e) || !/^action-\d+$/.test(String(e.id))) {
+          actionItems.push(e);
+          keptCount++;
+        } else {
+          removedCount++;
+          const row = dbRows.find((r: any) => String(r.originalId || r.id) === String(e.id));
+          if (row) {
+            try {
+              await updateActionItem(row.id, {
+                status: 'cancelled',
+                completionNote: '纪要表格已移除该派生项，自动取消（台账留痕）',
+              } as any);
+            } catch (err) {
+              console.warn(`[PATCH minutes] 软取消失败 action=${e.id}:`, err instanceof Error ? err.message : err);
+            }
+          }
+        }
+      }
 
       body.summary = summary;
       body.actionItems = actionItems;
       derivedData = { summary, actionItems };
-      console.log(`[PATCH] Minutes updated → derived ${actionItems.length} action items`);
+      console.log(`[PATCH] Minutes updated → 派生${fresh.length}条，保留手动项${keptCount}条，随表格移除${removedCount}条`);
     }
 
     const updated = await updateMeeting(meetingId, body);

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 import sql from 'mssql';
 import { getAppPool } from '@/lib/oa-task-push';
 
@@ -60,6 +61,8 @@ export async function GET() {
 // POST /api/meeting-types  { name, defaultDept?, defaultOwner? }
 export async function POST(req: NextRequest) {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await req.json();
     const { name, defaultDept = '', defaultOwner = '' } = body;
     if (!name?.trim()) return NextResponse.json({ success: false, error: '类别名称不能为空' }, { status: 400 });
@@ -83,6 +86,8 @@ export async function POST(req: NextRequest) {
 // PUT /api/meeting-types  { id, name?, defaultDept?, defaultOwner? }
 export async function PUT(req: NextRequest) {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const { id, ...updates } = await req.json();
     if (!id) return NextResponse.json({ success: false, error: '缺少 id' }, { status: 400 });
     const types = await read();
@@ -97,6 +102,8 @@ export async function PUT(req: NextRequest) {
 // DELETE /api/meeting-types  { id }
 export async function DELETE(req: NextRequest) {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const { id } = await req.json();
     const types = await read();
     const filtered = types.filter((t: MeetingType) => t.id !== id);

@@ -1,15 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/session';
 import { pushContinuousByType } from '@/lib/continuous-push';
 import { getCadenceConfigs, updateCadenceConfig } from '@/storage/database/cadence-storage';
+import { guardWrite } from '@/lib/api-guard';
 
 // POST /api/continuous/push - 手动触发持续项推送 OA
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
+
     const body = await request.json();
     const meetingType = body.meeting_type || body.meetingType;
     if (!meetingType) return NextResponse.json({ success: false, error: '缺少 meeting_type' }, { status: 400 });

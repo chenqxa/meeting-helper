@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/session';
 import { getCadenceConfigs, createCadenceConfig, updateCadenceConfig, deleteCadenceConfig } from '@/storage/database/cadence-storage';
+import { guardWrite } from '@/lib/api-guard';
 
 export async function GET() {
   try {
@@ -13,10 +14,8 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await request.json();
     const existing = await getCadenceConfigs();
     if (existing.find(c => c.meetingType === body.meetingType)) {
@@ -37,10 +36,8 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await request.json();
     const { id, ...rest } = body;
     const config = await updateCadenceConfig(id, rest);
@@ -53,10 +50,8 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
     if (!id) return NextResponse.json({ success: false, error: '缺少 id' }, { status: 400 });

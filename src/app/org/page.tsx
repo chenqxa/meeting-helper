@@ -8,6 +8,7 @@ import {
   Home, Folder, FolderOpen
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { PermissionMatrix } from '@/app/settings/permissions-tab';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter
 } from '@/components/ui/dialog';
@@ -41,7 +42,7 @@ const ROLE_OPTIONS = [
 
 export default function OrgPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<'org' | 'roles'>('org');
+  const [activeTab, setActiveTab] = useState<'org' | 'roles' | 'permissions'>('org');
   const [tree, setTree] = useState<OrgNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchKeyword, setSearchKeyword] = useState('');
@@ -584,6 +585,12 @@ export default function OrgPage() {
           }`}>
           <ShieldCheck className="w-4 h-4" /> 角色管理
         </button>
+        <button onClick={() => setActiveTab('permissions')}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            activeTab === 'permissions' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+          }`}>
+          <ShieldCheck className="w-4 h-4" /> 权限管理
+        </button>
       </div>
 
       {/* ── 角色管理面板 ── */}
@@ -775,6 +782,9 @@ export default function OrgPage() {
           </div>
         </div>
       )}
+
+      {/* ── 权限管理 ── */}
+      {activeTab === 'permissions' && <PermissionMatrix />}
 
       {activeTab === 'org' && (<>
       {/* 顶栏操作 */}

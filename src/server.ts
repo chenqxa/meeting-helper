@@ -1,12 +1,12 @@
 // 必须在 import next 之前加载，否则 Next.js 16 找不到 globalThis.AsyncLocalStorage
 import 'next/dist/server/node-environment-baseline';
 import dotenv from 'dotenv';
-// 先加载 .env，再加载本地开发覆盖（.env.development.local，优先级最高）
+// 先加载 .env，再加载本地开发覆盖（.env.development.local 优先级最高，必须最后加载）
 // 避免本地 dev 时 NEXT_PUBLIC_APP_URL 指向生产域名导致跳转
 dotenv.config();
 if (process.env.NODE_ENV !== 'production') {
-  dotenv.config({ path: '.env.development.local', override: true });
   dotenv.config({ path: '.env.development', override: true });
+  dotenv.config({ path: '.env.development.local', override: true });
 }
 import { existsSync, watchFile } from 'fs';
 import { createServer, IncomingMessage } from 'http';
@@ -289,15 +289,21 @@ async function notifyOaPullAlert(config: any, error: string) {
 }
 
 // 执行一次回拉（带运行记录 + 失败计数 + 重试退避）
-async function executeOaPull(mode: 'scheduled' | 'manual' | 'retry' | 'startup' = 'scheduled') {
+async function executeOaPull(mode: 'scheduled' | 'manual' | 'startup' | 'retry' = 'scheduled') {
   if (oaPullRunning) {
     console.log('[OAPull] 上次回拉未结束，跳过本次（防抖）');
     return;
   }
   oaPullRunning = true;
-  const run = await recordRunStart(mode);
+  let run: Awaited<ReturnType<typeof recordRunStart>> | null = null;
   try {
     const cfg = await getOaPullConfig();
+    // 总开关关闭：除管理员手动触发外一律跳过（填报已在系统内完成，不再从 OA 回拉）
+    if (!cfg.enabled && mode !== 'manual') {
+      console.log('[OAPull] 回拉已停用（hyzs_oa_pull_config.enabled=0），跳过');
+      return;
+    }
+    run = await recordRunStart(mode);
     // 增量游标：只在成功时推进
     const cursorAt = cfg.incremental && cfg.lastCursorAt ? cfg.lastCursorAt : null;
     const { executeOaPullResults } = await import('@/lib/oa-pull-runner');
@@ -336,7 +342,7 @@ async function executeOaPull(mode: 'scheduled' | 'manual' | 'retry' | 'startup' 
     }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    await recordRunFinish(run.id, { status: 'failed', error });
+    if (run) await recordRunFinish(run.id, { status: 'failed', error });
     await updateOaPullRuntime({ lastRunAt: new Date().toISOString(), lastRunStatus: 'failed', lastRunDetail: error });
     console.warn('[OAPull] 执行异常:', error);
   } finally {
@@ -424,6 +430,32 @@ function scheduleContinuousPush() {
       console.error('[ContinuousPush] 调度异常:', e instanceof Error ? e.message : e);
     }
   }, 60_000);
+}
+
+// ── 持续项「自动取数」：每周一 00:30（北京时间）自动取上一自然周数据，写入进度表 ──
+// 只对开启 auto_fetch 的持续项生效；数据源 SQL 未接入前为空跑（不写、不催）
+function scheduleContinuousAutoFetch() {
+  const scheduleNext = () => {
+    const nextFire = computeNextFire('00:30');
+    if (!nextFire) return;
+    const delay = nextFire.getTime() - Date.now();
+    console.log(`[ContinuousAutoFetch] 下次自动取数检查: ${nextFire.toLocaleString()}`);
+    setTimeout(async () => {
+      try {
+        // 仅北京时间周一凌晨执行（取上一自然周数据，周一早上即可用于周会看板）
+        const bj = getBeijingParts(new Date());
+        if (bj.dayOfWeek === 1) {
+          const { runAutoFetch } = await import('@/lib/continuous-auto-fetch');
+          const r = await runAutoFetch(new Date());
+          console.log(`[ContinuousAutoFetch] ${r.window.startLabel}~${r.window.endLabel} 候选 ${r.candidates} 写入 ${r.written} 缺失 ${r.missing.length}`);
+        }
+      } catch (e) {
+        console.error('[ContinuousAutoFetch] 执行异常:', e instanceof Error ? e.message : e);
+      }
+      scheduleNext();
+    }, delay);
+  };
+  scheduleNext();
 }
 
 // Create Next.js app
@@ -556,5 +588,7 @@ app.prepare().then(() => {
     scheduleTodoPush();
     // 持续项推送调度（每分钟检查 cadence_config）
     scheduleContinuousPush();
+    // 持续项自动取数调度（每周一凌晨）
+    scheduleContinuousAutoFetch();
   });
 });

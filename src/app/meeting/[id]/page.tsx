@@ -155,6 +155,11 @@ function OAUserPicker({ value, onSelect, onChange, placeholder }: {
   );
 }
 
+// 前端临时行动项 id：时间戳+自增序+随机段，快速连点不撞 key；服务端以其为 originalId 落台账
+let tmpActionSeq = 0;
+const nextTempActionId = () =>
+  `new-${Date.now().toString(36)}-${(++tmpActionSeq).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
 // 行内可编辑文本：点击变输入框，失焦/回车提交，Esc 取消
 function ContentEditableText({ value, onCommit, readOnly, className }: {
   value: string; onCommit: (v: string) => void; readOnly?: boolean; className?: string;
@@ -344,12 +349,12 @@ function InlineEdit({ value, onChange, className = '', tag = 'span', ...props }:
 }) {
   const ref = useRef<HTMLElement>(null);
   const lastVal = useRef(value);
-  // 初次挂载 + value 外部变化时同步 DOM
+  // 初次挂载 + value 外部变化时同步 DOM（聚焦编辑中跳过，防异步回写重置光标/覆盖正在输入的内容）
   useEffect(() => {
-    if (ref.current) {
+    if (ref.current && document.activeElement !== ref.current) {
       ref.current.textContent = value || '';
-      lastVal.current = value;
     }
+    lastVal.current = value;
   }, [value]);
   const Tag = tag as any;
   return (
@@ -515,24 +520,41 @@ function MeetingMinutesBlock({ minutes, meeting, onSave, onRegenerate, isGenerat
   const [isEditingMarkdown, setIsEditingMarkdown] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; sectionTitle: string } | null>(null);
 
-  // 当外部 minutes 变化时重置
+  // 当外部 minutes 变化时重置（本地有未保存编辑时不覆盖，防输入被服务端旧数据冲掉）
   useEffect(() => {
+    if (dirty) return;
     setData(JSON.parse(JSON.stringify(minutes)));
     setDirty(false);
     setIsEditingMarkdown(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minutes]);
+
+  // 他人归档（status → locked）时强制退出正文编辑态，避免锁定后页面仍显示可编辑
+  const meetingStatus = (meeting as any)?.status;
+  useEffect(() => {
+    if (meetingStatus === 'locked') setIsEditingMarkdown(false);
+  }, [meetingStatus]);
 
   if (!data) return null;
   const participants = (meeting.participants || []).map(normalizeName).filter(Boolean);
 
-  // 通用更新
+  // 通用更新：沿路径浅拷贝（替代整树深克隆，大文档键击不再全量克隆卡顿）
   const upd = (path: string, value: string) => {
-    const d = JSON.parse(JSON.stringify(data));
     const keys = path.split('.');
-    let obj: any = d;
-    for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
-    obj[keys[keys.length - 1]] = value;
-    setData(d); setDirty(true);
+    setData((prev: any) => {
+      if (!prev) return prev;
+      const root: any = Array.isArray(prev) ? [...prev] : { ...prev };
+      let obj: any = root;
+      for (let i = 0; i < keys.length - 1; i++) {
+        const k = keys[i];
+        const child = obj[k];
+        obj[k] = Array.isArray(child) ? [...child] : { ...(child || {}) };
+        obj = obj[k];
+      }
+      obj[keys[keys.length - 1]] = value;
+      return root;
+    });
+    setDirty(true);
   };
   const del = (arrayPath: string, index: number) => {
     const d = JSON.parse(JSON.stringify(data));
@@ -1087,6 +1109,7 @@ export default function MeetingEditorPage() {
     proposer: item.proposer || null,
     proposerLoginId: item.proposerLoginId || null,
     proposerOaId: item.proposerOaId || null,
+    proposerDept: item.proposerDept || item.proposer_dept || null,
     due_date: item.dueDate || item.due_date || null,
     due_date_type: item.dueDateType || item.due_date_type || null,
     priority: item.priority || 'medium',
@@ -1420,7 +1443,9 @@ export default function MeetingEditorPage() {
       proposerLoginId: item.proposerLoginId,
       proposerOaId: item.proposerOaId,
       due_date: item.due_date,
-      due_date_type: (item as any).due_date_type || (item.due_date ? 'date' : 'tbd'),
+      // 类型不预计算：保留 undefined 交给服务端按"有无日期"兜底，
+      // 避免新增项先算出 tbd、后填日期时 tbd 已固化导致锁定后日期不显示
+      due_date_type: (item as any).due_date_type,
       priority: item.priority,
     });
   };
@@ -1430,26 +1455,31 @@ export default function MeetingEditorPage() {
     setEditingAction(null);
 
     if (id.startsWith('new-')) {
-      // 新增项：调 addActionItem API 写入 DB，用真实 ID 替换临时 ID
+      // 新增项：调 addActionItem API 写入台账，仅回填该行的 dbId/originalId（id 保持不变，行不重挂载）
       try {
         const res = await fetch(`/api/meetings/${meetingId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ addActionItem: { ...editBuf, status: editBuf.status || 'confirmed', confidence_owner: 1, confidence_date: 1 } }),
+          body: JSON.stringify({ addActionItem: { id, ...editBuf, status: editBuf.status || 'confirmed', confidence_owner: 1, confidence_date: 1 } }),
         });
         const r = await res.json();
-        if (r.success && r.data?.actionItems) {
-          // 用 DB 返回的最新行动项列表替换（含真实 ID）
-          const serverItems: ActionItem[] = mapActionItems(r.data.actionItems || []);
-          setActionItems(serverItems);
+        if (r.success && r.createdAction) {
+          const created = r.createdAction;
+          setActionItems((prev: ActionItem[]) => prev.map((a: ActionItem) =>
+            a.id === id ? { ...a, dbId: created.id ?? a.dbId, originalId: created.originalId ?? a.originalId } : a
+          ));
+        } else {
+          alert(r.error || '新增行动项保存失败，请重试');
         }
-      } catch { /* 静默 */ }
+      } catch { alert('新增行动项保存失败，请检查网络后重试'); }
     } else {
-      await fetch(`/api/actions/${id}`, {
+      fetch(`/api/actions/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...editBuf, _meetingId: meetingId }),
-      }).catch(() => {});
+      }).then(r => r.json()).then(r => {
+        if (!r.success) alert(r.error || '行动项保存失败');
+      }).catch(() => { alert('行动项保存失败，请检查网络后重试'); });
     }
   }, [editBuf, meetingId]);
 
@@ -1462,7 +1492,7 @@ export default function MeetingEditorPage() {
     setActionItems((prev: ActionItem[]) => prev.map((a: ActionItem) => a.id === id ? { ...a, ...patch } : a));
     flashSaved(id);
     if (id.startsWith('new-')) {
-      // 新增项首次编辑：走 addActionItem 写库拿真实 ID
+      // 新增项首次编辑：走 addActionItem 写台账拿真实 ID（幂等，重复提交不产生重复行）
       const cur = actionItems.find(a => a.id === id);
       if (!cur) return;
       try {
@@ -1472,16 +1502,23 @@ export default function MeetingEditorPage() {
           body: JSON.stringify({ addActionItem: { ...cur, ...patch, status: 'confirmed', confidence_owner: 1, confidence_date: 1 } }),
         });
         const r = await res.json();
-        if (r.success && r.data?.actionItems) {
-          setActionItems(mapActionItems(r.data.actionItems || []));
+        if (r.success && r.createdAction) {
+          const created = r.createdAction;
+          setActionItems((prev: ActionItem[]) => prev.map((a: ActionItem) =>
+            a.id === id ? { ...a, dbId: created.id ?? a.dbId, originalId: created.originalId ?? a.originalId } : a
+          ));
+        } else {
+          alert(r.error || '行动项保存失败，请重试');
         }
-      } catch { /* 静默 */ }
+      } catch { alert('行动项保存失败，请检查网络后重试'); }
     } else {
-      await fetch(`/api/actions/${id}`, {
+      fetch(`/api/actions/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...patch, _meetingId: meetingId }),
-      }).catch(() => {});
+      }).then(r => r.json()).then(r => {
+        if (!r.success) alert(r.error || '行动项保存失败');
+      }).catch(() => { alert('行动项保存失败，请检查网络后重试'); });
     }
   }, [actionItems, meetingId]);
 
@@ -1492,7 +1529,7 @@ export default function MeetingEditorPage() {
 
   const addAction = () => {
     const newItem: ActionItem = {
-      id: `new-${Date.now()}`,
+      id: nextTempActionId(),
       dbId: null,
       originalId: null,
       description: '新行动项',
@@ -1515,7 +1552,7 @@ export default function MeetingEditorPage() {
   const duplicateAction = (item: ActionItem) => {
     const dup: ActionItem = {
       ...item,
-      id: `new-${Date.now()}`,
+      id: nextTempActionId(),
       dbId: null,
       originalId: null,
       description: `${item.description}（副本）`,
@@ -1530,6 +1567,31 @@ export default function MeetingEditorPage() {
       const el = document.getElementById(`action-${dup.id}`);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 50);
+  };
+
+  // 纪要保存（带乐观锁）：base_updated_at 与服务端不一致 → 409，确认后可强制覆盖
+  const saveMinutesToServer = async (updated: any, force = false): Promise<boolean> => {
+    const payload: any = { minutes: updated };
+    const baseUpdatedAt = (meeting as any)?.updatedAt ?? (meeting as any)?.updated_at;
+    if (!force && baseUpdatedAt) payload.base_updated_at = baseUpdatedAt;
+    const res = await fetch(`/api/meetings/${meetingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const r = await res.json().catch(() => ({ success: false as const }));
+    if (res.status === 409 && (r as any).conflict) {
+      if (window.confirm('检测到他人已保存过更新版本，继续保存将覆盖对方的修改。是否继续？')) {
+        return saveMinutesToServer(updated, true);
+      }
+      return false;
+    }
+    if (!r.success) { alert((r as any).error || '保存失败'); return false; }
+    setMinutes(updated);
+    // 自动更新派生的摘要和行动项
+    if ((r as any).derived?.summary) setSummary(convertSummary((r as any).derived.summary));
+    if ((r as any).derived?.actionItems) setActionItems(mapActionItems((r as any).derived.actionItems));
+    return true;
   };
 
   const transcript = meeting?.content || meeting?.input_content || meeting?.transcript || '';
@@ -2013,19 +2075,8 @@ export default function MeetingEditorPage() {
                     actionItems={actionItems}
                     onGoActions={() => setActiveTab('actions')}
                     onSave={async (updated) => {
-                    const res = await fetch(`/api/meetings/${meetingId}`, {
-                      method: 'PATCH',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ minutes: updated }),
-                    });
-                    const r = await res.json();
-                    if (r.success) {
-                      setMinutes(updated);
-                      // 自动更新派生的摘要和行动项
-                      if (r.derived?.summary) setSummary(convertSummary(r.derived.summary));
-                      if (r.derived?.actionItems) setActionItems(mapActionItems(r.derived.actionItems));
-                    }
-                    else { alert(r.error || '保存失败'); throw new Error(r.error); }
+                    const ok = await saveMinutesToServer(updated);
+                    if (!ok) throw new Error('save-cancelled');
                   }} />
                 ) : (
                   <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-4">
@@ -2080,16 +2131,11 @@ export default function MeetingEditorPage() {
                     {(minutes.meetingContent || minutes.conclusion) && (
                       <div className="border border-blue-200 bg-blue-50/50 rounded-xl p-4">
                         <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-2">会议概述</h3>
-                        <InlineEdit 
-                          value={minutes.meetingContent || minutes.conclusion || ''} 
+                        <InlineEdit
+                          value={minutes.meetingContent || minutes.conclusion || ''}
                           onChange={async (v) => {
                             const updated = { ...minutes, meetingContent: v };
-                            setMinutes(updated);
-                            await fetch(`/api/meetings/${meetingId}`, {
-                              method: 'PATCH',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ minutes: updated }),
-                            });
+                            await saveMinutesToServer(updated);
                           }}
                           className="text-sm text-slate-700 leading-relaxed block w-full" 
                           tag="p" 

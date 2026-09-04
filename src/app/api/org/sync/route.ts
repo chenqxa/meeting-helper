@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+
+import { guardWrite } from '@/lib/api-guard';
 import {
   createDepartment, updateDepartment, deleteDepartment, getDepartments,
   createEmployee, updateEmployee, deleteEmployee, getEmployees
@@ -41,6 +43,15 @@ interface SyncRequest {
 // POST /api/org/sync - 泛微OA组织架构同步
 export async function POST(request: NextRequest) {
   try {
+    // 内部同步通道（x-sync-token 正确）直接放行；普通请求需 admin
+    const syncToken = request.headers.get('x-sync-token');
+    const secret = process.env.INTERNAL_SYNC_SECRET;
+    const isInternal = !!(secret && syncToken === secret);
+    if (!isInternal) {
+      const guard = await guardWrite('admin');
+      if (!guard.ok) return guard.response;
+    }
+
     const body: SyncRequest = await request.json();
     const { type = 'incremental', departments = [], employees = [], removeMissing = false } = body;
 

@@ -11,6 +11,7 @@ interface MyTask {
   id: string;
   description: string;
   owner: string | null;
+  is_group?: boolean;
   proposer?: string | null;
   due_date: string | null;
   due_date_type?: 'date' | 'continuous' | 'tbd' | null;
@@ -65,20 +66,55 @@ export default function MyTasksPage() {
   const [tab, setTab] = useState<Tab>('全部');
   const [resultItem, setResultItem] = useState<MyTask | null>(null);
   const [resultForm, setResultForm] = useState({ text: '', status: 'done' });
+  const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
+  const [resultNone, setResultNone] = useState(false); // 持续项「本期无进展/无完成情况」：true=无（免填说明与附件）
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  // 企微卡片入口：?meetingId=xx 只显示该会议的待办（useEffect 中读取，避免 hydration 不一致）
+  const [focusMeetingId, setFocusMeetingId] = useState<string | null>(null);
+  const [focusMeetingTitle, setFocusMeetingTitle] = useState<string>('');
+
+  // 群体项代填模式（管理员）：附带"所有人/各部门"等群体责任人的持续项
+  const [showGroup, setShowGroup] = useState(false);
+  const [canSeeGroup, setCanSeeGroup] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/auth/me').then(r => r.json()).then(r => {
+      if (r.success && (r.data?.role === 'admin' || r.data?.role === 'manager')) setCanSeeGroup(true);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const mid = new URLSearchParams(window.location.search).get('meetingId');
+    if (mid) {
+      setFocusMeetingId(mid);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/actions/mine').then(r => r.json());
+      const qs = showGroup ? '?includeGroup=1' : '';
+      const r = await fetch(`/api/actions/mine${qs}`).then(r => r.json());
       if (r.success) setTasks(r.data || []);
     } catch { /* silent */ }
     setLoading(false);
-  }, []);
+  }, [showGroup]);
 
   useEffect(() => { load(); }, [load]);
+
+  // 群体项开关切换时重新加载
+  useEffect(() => { if (canSeeGroup) load(); }, [showGroup]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 聚焦会议标题（从已加载任务中取）
+  useEffect(() => {
+    if (focusMeetingId && !focusMeetingTitle) {
+      const hit = tasks.find(t => t.meeting_id === focusMeetingId);
+      if (hit?.meeting_title) setFocusMeetingTitle(hit.meeting_title);
+    }
+  }, [focusMeetingId, focusMeetingTitle, tasks]);
 
   // 弹窗打开时：document 级粘贴监听，任意位置 Ctrl+V 截图都能捕获
   useEffect(() => {
@@ -97,13 +133,18 @@ export default function MyTasksPage() {
   const openResult = (task: MyTask) => {
     setResultItem(task);
     // 预填过滤导入元数据（{"y":..,"w":..,"d":..}），避免混入新一轮汇报
-    setResultForm({ text: getDisplayOaResult(task.oa_result), status: task.status === 'done' ? 'done' : task.status === 'blocked' ? 'blocked' : 'in_progress' });
+    setResultForm({ text: getDisplayOaResult(task.oa_result), status: task.due_date_type === 'continuous' ? 'in_progress' : task.status === 'done' ? 'done' : 'blocked' });
+    setNextDueDate('');
     setResultImages([]);
+    // 上期填「无」的记录（oa_result 规范为"无"）重开时默认仍选「无」，无需再手点
+    setResultNone(task.due_date_type === 'continuous' && getDisplayOaResult(task.oa_result) === '无');
   };
 
   const filtered = tasks.filter(t => {
+    // 企微卡片聚焦模式：只显示该会议的待办
+    if (focusMeetingId && t.meeting_id !== focusMeetingId) return false;
     if (TAB_STATUS[tab] === null) return true;
-    if (TAB_STATUS[tab] === 'pending') return getActionDisplayStatus(t.status) === 'pending' && (t as any).oa_score == null;
+    if (TAB_STATUS[tab] === 'pending') return getActionDisplayStatus(t.status) === 'pending' && t.oa_score == null;
     return getActionDisplayStatus(t.status) === TAB_STATUS[tab];
   });
 
@@ -141,15 +182,39 @@ export default function MyTasksPage() {
       </div>
 
       {/* Tab 切换 */}
-      <div className="flex gap-1.5 mb-4 bg-slate-100 p-1 rounded-xl w-fit">
-        {TABS.map(t => (
+      <div className="flex items-center gap-1.5 mb-4 flex-wrap">
+        <div className="flex gap-1.5 bg-slate-100 p-1 rounded-xl w-fit">
+          {TABS.map(t => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${tab === t ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >{t}</button>
+          ))}
+        </div>
+        {canSeeGroup && (
           <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${tab === t ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-          >{t}</button>
-        ))}
+            onClick={() => setShowGroup(v => !v)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${showGroup ? 'bg-violet-500 text-white border-violet-500' : 'bg-white text-slate-500 border-slate-200 hover:border-violet-300 hover:text-violet-600'}`}
+            title="显示责任人为「所有人/各部门」等群体的持续项，由管理员代为填写"
+          >
+            👥 群体项 {showGroup ? '已显示' : ''}
+          </button>
+        )}
       </div>
+
+      {/* 企微卡片聚焦模式提示条 */}
+      {focusMeetingId && (
+        <div className="mb-4 px-4 py-2.5 bg-blue-50 border border-blue-100 rounded-xl flex items-center justify-between gap-3">
+          <span className="text-xs text-blue-700 truncate">
+            📋 正在查看{focusMeetingTitle ? `「${focusMeetingTitle}」` : '该会议'}的行动项（{filtered.length}条）
+          </span>
+          <button
+            onClick={() => setFocusMeetingId(null)}
+            className="text-xs text-blue-600 hover:text-blue-800 font-medium whitespace-nowrap"
+          >查看我的全部任务</button>
+        </div>
+      )}
 
       {/* 任务卡片列表 */}
       {loading ? (
@@ -193,6 +258,11 @@ export default function MyTasksPage() {
                       <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${sc.badgeBg} ${sc.badgeText}`}>
                         {sc.icon}{sc.label}
                       </span>
+                      {task.is_group && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-100" title="责任人为群体，由管理员代填">
+                          👥 {task.owner}
+                        </span>
+                      )}
                       <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${pc.color}`}>{pc.label}</span>
                       {dueTypeBadge}
                       {overdue && (
@@ -312,11 +382,10 @@ export default function MyTasksPage() {
               {resultItem.due_date_type !== 'continuous' && (
                 <div>
                   <div className="text-xs font-medium text-slate-500 mb-2.5">处理结果</div>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     {[
                       { value: 'done',        label: '已完成', emoji: '✅', activeBg: 'bg-emerald-500', border: 'border-emerald-300', bg: 'bg-emerald-50', text: 'text-emerald-700' },
-                      { value: 'in_progress', label: '进行中', emoji: '🔄', activeBg: 'bg-blue-500',    border: 'border-blue-300',    bg: 'bg-blue-50',    text: 'text-blue-700' },
-                      { value: 'blocked',     label: '阻塞',   emoji: '🚫', activeBg: 'bg-red-500',     border: 'border-red-300',     bg: 'bg-red-50',     text: 'text-red-700' },
+                      { value: 'blocked',     label: '未完成', emoji: '🚫', activeBg: 'bg-red-500',     border: 'border-red-300',     bg: 'bg-red-50',     text: 'text-red-700' },
                     ].map(opt => (
                       <button
                         key={opt.value}
@@ -335,6 +404,46 @@ export default function MyTasksPage() {
                 </div>
               )}
 
+              {resultItem.due_date_type !== 'continuous' && resultForm.status === 'blocked' && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-2.5">下次完成时间 <span className="text-red-400">*</span></div>
+                  <input
+                    type="date"
+                    value={nextDueDate}
+                    onChange={e => setNextDueDate(e.target.value)}
+                    className="w-full h-9 text-sm border border-slate-200 rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-red-200 focus:border-red-300"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">选择后系统将自动生成一条带新截止时间的新任务</p>
+                </div>
+              )}
+
+              {/* 持续项：先选本期是否有完成情况；无 → 免填说明与附件 */}
+              {resultItem.due_date_type === 'continuous' && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-2.5">本期是否有完成情况？</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { value: 'none', label: '无进展', note: '本期无事发生，免填', activeBg: 'bg-slate-500', border: 'border-slate-300', bg: 'bg-slate-50', text: 'text-slate-600' },
+                      { value: 'has',   label: '有进展', note: '需填说明 + 附截图',  activeBg: 'bg-blue-500',  border: 'border-blue-300', bg: 'bg-blue-50', text: 'text-blue-700' },
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setResultNone(opt.value === 'none')}
+                        className={`py-2.5 rounded-xl border-2 flex flex-col items-center gap-0.5 transition-all ${
+                          (opt.value === 'none') === resultNone
+                            ? `${opt.activeBg} border-transparent text-white shadow-md scale-[1.02]`
+                            : `${opt.bg} ${opt.border} ${opt.text} hover:scale-[1.01]`
+                        }`}
+                      >
+                        <span className="text-sm font-semibold">{opt.label}</span>
+                        <span className="text-[10px] opacity-70">{opt.note}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(resultItem.due_date_type !== 'continuous' || !resultNone) && (<>
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs font-medium text-slate-500">{resultItem.due_date_type === 'continuous' ? '进展说明' : '处理说明'} <span className="text-red-400">*</span></div>
@@ -367,7 +476,7 @@ export default function MyTasksPage() {
                   <input id="mytask-img-upload" type="file" accept="image/*" multiple className="hidden"
                     onChange={e => setResultImages(prev => [...prev, ...Array.from(e.target.files || [])])} />
                   <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 或 拖拽图片至此</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
                   <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
                 </div>
                 {resultImages.length > 0 && (
@@ -391,6 +500,7 @@ export default function MyTasksPage() {
                   </div>
                 )}
               </div>
+              </>)}
             </div>
 
             <div className="px-6 py-4 border-t border-slate-100 flex gap-3 mt-2">
@@ -400,38 +510,57 @@ export default function MyTasksPage() {
               >取消</button>
               <button
                 onClick={async () => {
-                  // 处理说明必填
-                  if (!resultForm.text.trim()) {
-                    alert('请填写处理说明');
+                  const isCont = resultItem.due_date_type === 'continuous';
+                  const isNone = isCont && resultNone; // 持续项选「无进展」：免填说明与附件
+                  // 未完成必须填下次完成时间
+                  if (!isCont && resultForm.status === 'blocked' && !nextDueDate) {
+                    alert('请选择下次完成时间');
                     return;
                   }
-                  // 图片附件必填（至少 1 张）
-                  if (resultImages.length === 0) {
-                    alert('请至少上传 1 张图片附件（截图、证明材料等）');
-                    return;
+                  if (!isNone) {
+                    // 处理说明/进展说明必填
+                    if (!resultForm.text.trim()) {
+                      alert(isCont ? '请填写进展说明' : '请填写处理说明');
+                      return;
+                    }
+                    // 图片附件必填（至少 1 张）——持续项选「有进展」同样需要证明截图
+                    if (resultImages.length === 0) {
+                      alert('请至少上传 1 张图片附件（截图、证明材料等）');
+                      return;
+                    }
                   }
                   setResultSubmitting(true);
                   try {
                     const imageUrls: string[] = [];
-                    for (const file of resultImages) {
-                      const fd = new FormData();
-                      fd.append('file', file);
-                      fd.append('type', 'image');
-                      const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
-                      if (r.success) imageUrls.push(r.url);
+                    if (!isNone) {
+                      for (const file of resultImages) {
+                        const fd = new FormData();
+                        fd.append('file', file);
+                        fd.append('type', 'image');
+                        const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
+                        if (r.success) imageUrls.push(r.url);
+                      }
                     }
                     const res = await fetch(`/api/actions/${resultItem.id}`, {
                       method: 'PUT',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
-                        oa_result: resultForm.text,
+                        // 持续项「无进展」：内容统一为"无"，后台据此打 is_none 标记（不计有进展统计）
+                        oa_result: isNone ? '无' : resultForm.text,
                         oa_result_at: new Date().toISOString(),
-                        // 持续项：不设处理结果，状态保持进行中，不写 oa_score
-                        ...(resultItem.due_date_type !== 'continuous'
-                          ? { ...(resultForm.status !== 'in_progress' ? { oa_score: resultForm.status === 'done' ? 1 : -1 } : {}), status: resultForm.status }
-                          : { status: 'in_progress' }),
+                        // 与待办中心口径一致：已完成=V(+1)；未完成=X(-1)+下次日期自动重派新任务；
+                        // 持续项：进展汇报，状态保持进行中，不打分
+                        oa_none: isCont ? resultNone : undefined,
+                        ...(isCont
+                          ? { status: 'in_progress' }
+                          : {
+                              oa_score: resultForm.status === 'done' ? 1 : -1,
+                              status: resultForm.status,
+                              next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined,
+                            }),
                         oa_auto_detected: false,
-                        oa_attachments: imageUrls.length > 0 ? imageUrls : (resultItem.oa_attachments || []),
+                        // 「无进展」不保留历史附件，避免误导为有内容
+                        oa_attachments: isNone ? [] : (imageUrls.length > 0 ? imageUrls : (resultItem.oa_attachments || [])),
                       }),
                     });
                     if (res.ok) { setResultItem(null); load(); }
@@ -441,8 +570,7 @@ export default function MyTasksPage() {
                 className={`flex-1 h-10 rounded-xl text-sm font-semibold text-white transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
                   resultItem.due_date_type === 'continuous' ? 'bg-blue-600 hover:bg-blue-700' :
                   resultForm.status === 'done'    ? 'bg-emerald-500 hover:bg-emerald-600' :
-                  resultForm.status === 'blocked' ? 'bg-red-500 hover:bg-red-600' :
-                  'bg-blue-600 hover:bg-blue-700'
+                  'bg-red-500 hover:bg-red-600'
                 }`}
               >
                 {resultSubmitting ? (
@@ -450,9 +578,8 @@ export default function MyTasksPage() {
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 提交中...
                   </span>
                 ) : (
-                  resultItem.due_date_type === 'continuous' ? '🔄 更新进展' :
-                  resultForm.status === 'done'    ? '✅ 标记完成' :
-                  resultForm.status === 'blocked' ? '🚫 报告阻塞' : '🔄 更新进展'
+                  resultItem.due_date_type === 'continuous' ? (resultNone ? '提交无进展' : '🔄 更新进展') :
+                  resultForm.status === 'done'    ? '✅ 标记完成' : '🚫 标记未完成'
                 )}
               </button>
             </div>

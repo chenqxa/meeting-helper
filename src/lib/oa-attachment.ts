@@ -171,6 +171,13 @@ export async function saveOaAttachment(docId: string): Promise<{
   const { buffer, contentType, imageFileId: realFileId } = await downloadOaAttachment(docId);
   const { mime, ext, kind } = detectMime(buffer);
   const filename = `oa_${realFileId}_${Date.now()}.${ext}`;
+  // 入库（主存储）+ 落盘（缓存）
+  try {
+    const { saveFileToDb } = await import('@/storage/database/file-storage');
+    await saveFileToDb(filename, contentType || mime, buffer);
+  } catch (e) {
+    console.warn('[oa-attachment] 附件入库失败（继续落盘）:', e instanceof Error ? e.message : e);
+  }
   const uploadDir = process.env.UPLOAD_DIR || path.join(process.cwd(), '.uploads');
   await fs.mkdir(uploadDir, { recursive: true });
   await fs.writeFile(path.join(uploadDir, filename), buffer);

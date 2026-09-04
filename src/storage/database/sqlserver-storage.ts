@@ -73,14 +73,27 @@ export async function getPool(): Promise<sql.ConnectionPool> {
     } catch (error) {
       lastConnectFailureAt = Date.now();
       lastConnectFailureError = error instanceof Error ? error : new Error(String(error));
+      pool = null;
       throw error;
     }
     lastConnectFailureError = null;
   }
   if (!tablesEnsured) {
-    tablesEnsured = true;
-    await ensureTable(pool);
-    await ensureActionItemsTable(pool);
+    try {
+      await ensureTable(pool);
+      await ensureActionItemsTable(pool);
+      tablesEnsured = true;
+    } catch (error) {
+      tablesEnsured = false;
+      const code = (error as { code?: string })?.code;
+      if (code === 'ECONNCLOSED' || code === 'ESOCKET' || code === 'ETIMEOUT' || code === 'ECONNRESET') {
+        pool = null;
+        lastConnectFailureAt = 0;
+        lastConnectFailureError = null;
+        return getPool();
+      }
+      throw error;
+    }
     if (!migrationDone) {
       migrationDone = true;
       migrateFromMeetings(pool)

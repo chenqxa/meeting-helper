@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./.uploads:/app/.uploads
+      - ./org-data.json:/app/org-data.json
     ports:
       - "5000:5000"
     env_file:

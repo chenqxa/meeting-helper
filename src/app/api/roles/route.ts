@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/session';
-import { resolveRole, UserRole } from '@/lib/roles';
+import { resolveRole, UserRole, clearRoleCache } from '@/lib/roles';
 import sql from 'mssql';
 import { getAppPool } from '@/lib/oa-task-push';
 
@@ -95,5 +95,6 @@ export async function POST(req: NextRequest) {
   }
 
   await writeConfig(config);
+  clearRoleCache(); // 角色变更立即生效（清 10 分钟缓存）
   return NextResponse.json({ success: true });
 }

@@ -19,6 +19,5 @@ yarn-error.log*
 *.docx
 temp-*
 meetings-data.json
-org-data.json
 debug-meeting.json
 base-data.json

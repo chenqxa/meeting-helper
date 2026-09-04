@@ -1,6 +1,6 @@
 # 周例会看板（/weekly-board）开发文档
 
-> 版本：v1.0  ·  对应代码：`src/app/weekly-board/page.tsx`
+> 版本：v1.1  ·  对应代码：`src/app/weekly-board/page.tsx`
 > 依赖：`src/components/ui/carousel.tsx`（Embla）、`GET /api/actions`
 
 ---
@@ -139,8 +139,32 @@ const slides = useMemo(() => [
 - 自动播放固定 6s，未做按页时长配置。
 - 占位页待业务内容填充。
 - 演示页内不能改状态（轻交互边界）。
+- **填报窗口依赖"周例会固定周一"前提**：例会日若调整，需将 `contPeriod` 改为按真实会议记录动态计算（v2 扩展点，见需求文档 11.3）。
 
-## 11. 验证命令
+## 11. v1.1 统计周期实现（2026-08-31）
+
+```ts
+// dataPeriod（行动项数据周）：锚定今天 → 上一自然周（周一~周日）
+const dataPeriod = useMemo(() => {
+  const base = weekPeriod(new Date());          // 上周一 ~ 上周日
+  if (weekOffset === 0) return base;
+  const shift = weekOffset * 7;                  // 翻历史周
+  ...
+}, [weekOffset]);
+
+// contPeriod（持续项填报窗口）：数据周整体后移一天（周二~周一 = 上次会次日~本次会日）
+const contPeriod = useMemo(() => {
+  const start = new Date(dataPeriod.start); start.setDate(start.getDate() + 1);
+  const end = new Date(dataPeriod.end);     end.setDate(end.getDate() + 1);
+  return { start, end };
+}, [dataPeriod]);
+```
+
+- `progressInWeek`（持续项本期填报）改用 `contPeriod` 过滤，窗口内取最新一条；
+- `ContinuousSlide` / `StatsSlide` 新增 `periodText` / `contPeriodText` props，界面明示填报窗口；
+- 附带修复：翻历史周时 `weekStats.calcPeriod` 的 weekOffset 双重偏移 bug（`calcPeriod(0)` / `calcPeriod(1)`）。
+
+## 12. 验证命令
 
 ```bash
 pnpm ts-check                    # 类型检查（本项目无单测框架）

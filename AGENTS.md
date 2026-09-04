@@ -44,6 +44,8 @@
 
 - **项目理解加速**：初始可以依赖项目下`package.json`文件理解项目类型，如果没有或无法理解退化成阅读其他文件。
 - **Hydration 错误预防**：严禁在 JSX 渲染逻辑中直接使用 typeof window、Date.now()、Math.random() 等动态数据。必须使用 'use client' 并配合 useEffect + useState 确保动态内容仅在客户端挂载后渲染；同时严禁非法 HTML 嵌套（如 <p> 嵌套 <div>）。
+- **文件改动安全（防编码事故）**：所有源码文件的增删改**必须逐个使用安全的编辑/写入工具**（按文件读取→精确替换），**严禁**用 PowerShell 的 `Get-Content -Raw` + `Set-Content` / `-replace` 批量覆写源码文件——这类操作会把 UTF-8 文件按系统 ANSI 编码重写导致中文乱码（2026-09 曾因此破坏三个看板页面）。大文件、涉及多文件的一律拆成单文件逐条改动。
+- **改动即备份**：重要改动（尤其批量/多文件）前先 `git add -A && git commit` 落一个安全点，改坏可一键回退。
 
 
 ## UI 设计与组件规范 (UI & Styling Standards)

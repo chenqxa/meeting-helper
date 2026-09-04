@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { WeaverPagination } from '@/components/ui/weaver-pagination';
 import { DeptSelect } from '@/components/ui/dept-select';
+import { autoFetchSourceName, autoFetchSourceDesc, firstAutoFetchSourceKey } from '@/lib/auto-fetch-sources-meta';
 
 interface Item {
   id: string; description: string; owner: string | null; dept: string | null;
@@ -19,6 +20,8 @@ interface Item {
   proposer_dept?: string | null;
   initial_result?: string | null;
   oa_result: string | null; oa_score: number | null;
+  auto_fetch?: number | null; // 1=自动取数（每周定时自动写本期进展，不再催人填报）
+  auto_fetch_source?: string | null; // 绑定的取数源 key
 }
 
 function getISOWeek(dateStr: string): { year: number; week: number } {
@@ -111,6 +114,8 @@ export default function ContinuousPage() {
   const [ownerPos, setOwnerPos] = useState<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 0 });
   const [departments, setDepartments] = useState<string[]>([]);
   const [userRole, setUserRole] = useState('');
+  const [currentUserName, setCurrentUserName] = useState('');
+  const [currentUserLoginId, setCurrentUserLoginId] = useState('');
   const [employees, setEmployees] = useState<string[]>([]);
   const [proposerQuery, setProposerQuery] = useState<string | undefined>(undefined);
   const [proposerPos, setProposerPos] = useState<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 0 });
@@ -124,6 +129,7 @@ export default function ContinuousPage() {
   const [statsTypeFilter, setStatsTypeFilter] = useState('all'); // all | 会议类型
   const [preview, setPreview] = useState<{ url: string; filename: string; kind: string; loading: boolean; error: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [autoBusy, setAutoBusy] = useState<string | null>(null); // 正在切换「自动取数」的项
 
   const openFilterMenu = (key: string, e: React.MouseEvent) => {
     if (openFilter === key) { setOpenFilter(null); return; }
@@ -144,7 +150,11 @@ export default function ContinuousPage() {
 
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
-      if (d.success) setUserRole(d.data.role || '');
+      if (d.success) {
+        setUserRole(d.data.role || '');
+        setCurrentUserName(d.data.name || '');
+        setCurrentUserLoginId(d.data.loginid || '');
+      }
     }).catch(() => {});
     fetch('/api/org/employees').then(r => r.json()).then(d => {
       if (d.success) setEmployees((d.data || []).map((e: any) => e.name).filter(Boolean));
@@ -220,6 +230,29 @@ export default function ContinuousPage() {
     }
   }, []);
 
+  // 开启/关闭「自动取数」：自动取数的持续项每周由系统定时自动写入本期进展，不再催人填报；
+  // 开启时绑定取数源（目前默认首个可用源「呆滞出库」）
+  const toggleAutoFetch = useCallback(async (item: Item, on: boolean) => {
+    setAutoBusy(item.id);
+    try {
+      const body: any = { auto_fetch: on };
+      if (on) body.auto_fetch_source = firstAutoFetchSourceKey();
+      const res = await fetch(`/api/actions/${item.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.success) { alert((j as any).error || '设置失败'); return; }
+      setItems(prev => prev.map(x => x.id === item.id
+        ? { ...x, auto_fetch: on ? 1 : 0, auto_fetch_source: on ? firstAutoFetchSourceKey() : null }
+        : x));
+    } catch {
+      alert('设置失败：网络错误');
+    } finally {
+      setAutoBusy(null);
+    }
+  }, []);
+
   const filterOptions = useMemo(() => {
     const owners = [...new Set(items.map(i => i.owner).filter(Boolean))].sort() as string[];
     const depts = [...new Set(items.map(i => i.dept).filter(Boolean))].sort() as string[];
@@ -228,6 +261,12 @@ export default function ContinuousPage() {
   }, [items]);
 
   const filtered = items.filter(i => {
+    // 普通角色（employee/secretary）仅看自己相关的持续项（责任人=我 或 提出人=我）
+    if (userRole === 'employee' || userRole === 'secretary') {
+      const isOwner = i.owner === currentUserName || i.owner === currentUserLoginId;
+      const isProposer = i.proposer === currentUserName || i.proposer === currentUserLoginId;
+      if (!isOwner && !isProposer) return false;
+    }
     if (search && !i.description.toLowerCase().includes(search.toLowerCase())
       && !i.owner?.toLowerCase().includes(search.toLowerCase())) return false;
     if (filters.owner && i.owner !== filters.owner) return false;
@@ -492,6 +531,9 @@ export default function ContinuousPage() {
                       <Filter className={`w-3 h-3 ${filters.dept ? 'text-blue-600 fill-blue-600' : 'text-slate-300 hover:text-slate-500'}`} />
                     </div>
                   </th>
+                  <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap" title="开启后每周定时自动取数写入本期进展，系统不再催人填报">
+                    自动取数
+                  </th>
                   <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">
                     <div className="flex items-center justify-center gap-1 cursor-pointer select-none" onClick={e => openFilterMenu('audit', e)} data-filter-trigger>
                       <span>稽核</span>
@@ -506,9 +548,9 @@ export default function ContinuousPage() {
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {loading ? (
-                  <tr><td colSpan={11} className="text-center py-16 text-slate-400">加载中...</td></tr>
+                  <tr><td colSpan={12} className="text-center py-16 text-slate-400">加载中...</td></tr>
                 ) : paginated.length === 0 ? (
-                  <tr><td colSpan={11} className="text-center py-16 text-slate-400">
+                  <tr><td colSpan={12} className="text-center py-16 text-slate-400">
                     <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
                     <p>暂无持续项</p>
                   </td></tr>
@@ -669,6 +711,30 @@ export default function ContinuousPage() {
                           >{item.dept || '—'}</button>
                         )}
                       </td>
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        {userRole === 'admin' ? (
+                          <div className="flex flex-col items-center gap-0.5">
+                            <Switch
+                              checked={!!(item as any).auto_fetch}
+                              onCheckedChange={(on: boolean) => toggleAutoFetch(item, on)}
+                              disabled={autoBusy === item.id}
+                              aria-label="自动取数"
+                              title={((item as any).auto_fetch ? '已开启自动取数：每周定时自动写本期进展，不再催人填报' : '开启自动取数：每周定时自动写本期进展，不再催人填报')}
+                            />
+                            <span className="text-[10px] text-slate-400 leading-none"
+                              title={((item as any).auto_fetch ? (autoFetchSourceDesc((item as any).auto_fetch_source) || '') : '')}>
+                              {((item as any).auto_fetch ? (autoFetchSourceName((item as any).auto_fetch_source) || '—') : '—')}
+                            </span>
+                          </div>
+                        ) : ((item as any).auto_fetch ? (
+                          <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full"
+                            title={autoFetchSourceDesc((item as any).auto_fetch_source) || undefined}>
+                            自动·{autoFetchSourceName((item as any).auto_fetch_source) || ''}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 text-xs">—</span>
+                        ))}
+                      </td>
                       {editingId === item.id ? (
                         <React.Fragment>
                           <td className="px-4 py-3 text-center" colSpan={2}>
@@ -688,6 +754,7 @@ export default function ContinuousPage() {
                       ) : (
                         <React.Fragment>
                           <td className="px-4 py-3 text-center whitespace-nowrap">
+                            {userRole === 'admin' ? (
                             <div className="flex items-center justify-center gap-1">
                               {[
                                 { val: 1, label: 'V', activeCls: 'bg-emerald-100 text-emerald-700 border-emerald-300', inactiveCls: 'bg-white text-slate-300 border-slate-200 hover:border-emerald-300 hover:text-emerald-500' },
@@ -714,6 +781,11 @@ export default function ContinuousPage() {
                                 );
                               })}
                             </div>
+                            ) : ((item as any).oa_score != null ? (
+                              <span className={`text-sm font-bold ${(item as any).oa_score > 0 ? 'text-emerald-600' : (item as any).oa_score === 0 ? 'text-slate-500' : 'text-red-600'}`}>
+                                {(item as any).oa_score > 0 ? 'V' : (item as any).oa_score === 0 ? '0' : 'X'}
+                              </span>
+                            ) : <span className="text-slate-300 text-xs" title="仅管理员可稽核">—</span>)}
                           </td>
                           <td className="px-4 py-3 text-center text-sm font-medium">
                             {(item as any).oa_score != null ? (

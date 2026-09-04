@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getActionItemById, getActionItemByMeetingAndOriginalId, updateActionItem, getMeetingById, updateMeeting, getTaskBatchById, getAllActionItems, getMeetings } from '@/storage';
-import { resolveActionOwnerIdentity } from '@/lib/action-owner';
+import { getActionItemById, getActionItemByMeetingAndOriginalId, updateActionItem, getMeetingById, updateMeeting, getTaskBatchById, getAllActionItems, getMeetings, createActionItem } from '@/storage';
+import { resolveActionOwnerIdentity, resolveDeptByName } from '@/lib/action-owner';
 import { autoDetectStatus } from '@/lib/action-status';
 import { logOperation } from '@/lib/operation-log';
 import { getAppPool, pushMeetingTasksToOA } from '@/lib/oa-task-push';
 import { rescheduleActionItem } from '@/lib/oa-pull-runner';
 import { upsertContinuousProgress } from '@/storage/database/continuous-progress-storage';
+import { updateActionAutoFetch } from '@/storage/database/action-storage';
+import { firstAutoFetchSourceKey } from '@/lib/auto-fetch-sources-meta';
+import { guardWrite } from '@/lib/api-guard';
+import { getCurrentUser } from '@/lib/session';
 
 // 按月开的会（产销会/公司月会）：看的是上月数据 → 填报归属「最近一次已开完同类会议」所在月份
 const MONTHLY_MEETING_TYPES = new Set(['产销会', '公司月会']);
@@ -72,6 +76,41 @@ export async function PUT(
       }
     }
 
+    // JSON-only 项惰性回填：历史双写分歧遗留的"仅在会议 JSON"行动项，首次编辑时补建台账行
+    if (!existing && body._meetingId) {
+      try {
+        const meeting = await getMeetingById(body._meetingId);
+        const legacy = (meeting?.actionItems || []).find((it: any) => it.id === actionId);
+        if (legacy) {
+          const created = await createActionItem({
+            meetingId: body._meetingId,
+            originalId: legacy.id,
+            description: legacy.description || '',
+            owner: legacy.owner || legacy.assignee || null,
+            ownerLoginId: legacy.ownerLoginId || null,
+            ownerOaId: legacy.ownerOaId || legacy.owner_oa_id || null,
+            dept: legacy.dept || null,
+            proposer: legacy.proposer || null,
+            proposerLoginId: legacy.proposerLoginId || null,
+            proposerOaId: legacy.proposerOaId || null,
+            proposerDept: legacy.proposer_dept || legacy.proposerDept || null,
+            dueDate: legacy.dueDate || legacy.due_date || null,
+            dueDateType: legacy.dueDateType || legacy.due_date_type || null,
+            priority: legacy.priority || 'medium',
+            status: legacy.status || 'pending',
+            sourceText: legacy.sourceText || legacy.source_sentence || null,
+            confidenceOwner: legacy.confidence?.assignee ?? legacy.confidence_owner ?? null,
+            confidenceDate: legacy.confidence?.dueDate ?? legacy.confidence_date ?? null,
+          } as any);
+          existing = created;
+          targetActionId = created.id;
+          console.log(`[PUT action] JSON-only 项已回填台账: ${actionId} -> ${created.id}`);
+        }
+      } catch (e) {
+        console.warn('[PUT action] JSON-only 回填失败:', e instanceof Error ? e.message : e);
+      }
+    }
+
     if (!existing) {
       return NextResponse.json({ success: false, error: 'Action item not found' }, { status: 404 });
     }
@@ -91,6 +130,41 @@ export async function PUT(
       }, { status: 403 });
     }
 
+    // ── 分层权限校验（顺序：404 → 转派锁定 → 本分层校验 → 业务逻辑）──
+    // 责任人自助汇报：进展/附件 + 完成自报（done=V(+1) / blocked=X(-1)+下次日期重派）；
+    // 自报分数由前端提交、后端按状态兜底；改责任人/描述/日期等结构字段仍仅 admin
+    const FORBIDDEN_KEYS = [
+      'next_due_date',
+      'owner', 'ownerLoginId', 'ownerOaId', 'dept',
+      'proposer', 'proposerLoginId', 'proposerOaId', 'proposer_dept',
+      'description', 'due_date', 'dueDate', 'due_date_type', 'priority',
+      'auto_fetch',
+    ];
+    const SELF_REPORT_STATUSES = ['in_progress', 'done', 'blocked'];
+    const hasAdminOnlyFields = FORBIDDEN_KEYS.some(k => k in body);
+    const statusOk = body.status === undefined || SELF_REPORT_STATUSES.includes(body.status);
+    const currentUser = await getCurrentUser();
+    const isOwner = !!currentUser && (
+      existing.owner === currentUser.name || existing.ownerLoginId === currentUser.loginid
+    );
+    const isSelfReport = !hasAdminOnlyFields && statusOk && isOwner;
+
+    if (!isSelfReport) {
+      const guard = await guardWrite('admin');
+      if (!guard.ok) return guard.response;
+    }
+
+    // 持续项「自动取数」标记 + 绑定取数源：仅 admin（已在 FORBIDDEN_KEYS 兜底）；独立轻量更新后直接返回
+    if (body.auto_fetch !== undefined) {
+      const enabled = !!body.auto_fetch;
+      const sourceKey: string | null = enabled ? (body.auto_fetch_source ?? firstAutoFetchSourceKey()) : null;
+      if (enabled && !sourceKey) {
+        return NextResponse.json({ success: false, error: '尚未配置任何自动取数源，无法开启' }, { status: 400 });
+      }
+      await updateActionAutoFetch(targetActionId, enabled, sourceKey);
+      return NextResponse.json({ success: true, data: { id: targetActionId, auto_fetch: enabled ? 1 : 0, auto_fetch_source: sourceKey } });
+    }
+
     const patch: Record<string, any> = {};
     if (body.status !== undefined) patch.status = body.status;
     if (body.description !== undefined) patch.description = body.description;
@@ -100,13 +174,27 @@ export async function PUT(
     if (body.due_date !== undefined) patch.dueDate = body.due_date;
     if (body.dueDate !== undefined) patch.dueDate = body.dueDate;
     if (body.due_date_type !== undefined) patch.dueDateType = body.due_date_type;
+    // 行内编辑日期联动类型：填了日期而类型还是 tbd（历史固化）→ 自动转为 date，
+    // 防止库里"tbd+有日期"残留导致企微卡片/看板显示"待定"而详情页自愈不一致
+    if ((body.due_date !== undefined || body.dueDate !== undefined) && body.due_date_type === undefined) {
+      const newDue = (patch.dueDate ?? existing.dueDate) || '';
+      if (newDue && String(newDue).trim() && existing.dueDateType === 'tbd') {
+        patch.dueDateType = 'date';
+      }
+    }
     if (body.priority !== undefined) patch.priority = body.priority;
     if (body.dept !== undefined) patch.dept = body.dept;
-    if (body.proposer !== undefined) patch.proposer = body.proposer;
+    if (body.proposer !== undefined) patch.proposer = (body.proposer || '').trim() || null;
     if (body.proposerLoginId !== undefined) patch.proposerLoginId = body.proposerLoginId;
     if (body.proposerOaId !== undefined) patch.proposerOaId = body.proposerOaId;
     if (body.proposer_dept !== undefined) patch.proposerDept = body.proposer_dept;
     if (body.completion_note !== undefined) patch.completionNote = body.completion_note;
+
+    if (body.proposer !== undefined) {
+      // 提出人变更时重新反查提出部门，避免台账显示旧部门
+      const proposerDept = await resolveDeptByName(patch.proposer ?? existing.proposer);
+      if (proposerDept) patch.proposerDept = proposerDept;
+    }
 
     if (
       body.owner !== undefined ||
@@ -127,17 +215,17 @@ export async function PUT(
     }
 
     if (body.status === 'done') {
-      patch.completedBy = body.completed_by || '当前用户';
+      patch.completedBy = body.completed_by || currentUser?.name || existing.owner || '未知用户';
       patch.completedAt = now;
       patch.completionNote = body.completion_note || null;
       patch.evidenceFiles = body.evidence_files || existing.evidenceFiles || [];
     }
     if (body.status === 'in_progress' && !existing.confirmedAt) {
-      patch.confirmedBy = body.confirmed_by || '当前用户';
+      patch.confirmedBy = body.confirmed_by || currentUser?.name || existing.owner || '未知用户';
       patch.confirmedAt = now;
     }
     if (body.status === 'blocked') {
-      patch.blockedBy = body.blocked_by || '当前用户';
+      patch.blockedBy = body.blocked_by || currentUser?.name || existing.owner || '未知用户';
       patch.blockedAt = now;
       patch.blockReason = body.block_reason || null;
     }
@@ -148,12 +236,20 @@ export async function PUT(
     if (body.oa_auto_detected !== undefined) patch.oaAutoDetected = body.oa_auto_detected;
     if (body.oa_attachments !== undefined) patch.oaAttachments = body.oa_attachments;
 
-    // 从汇报文本自动判定：文字写了"已完成"但状态选的"进行中"→ 自动纠正为 V
+    // 自报分数强制对齐状态（防任意传分）：已完成=V(+1)、未完成=X(-1)，其余状态不允许带分；
+    // 稽核改分（V/X/0 任意切换）仅 admin（走 guardWrite 分支）
+    if (isSelfReport) {
+      if (body.status === 'done') patch.oaScore = 1;
+      else if (body.status === 'blocked') patch.oaScore = -1;
+      else delete patch.oaScore;
+    }
+
+    // 从汇报文本自动判定：文字写了"已完成"但状态选的"未完成"→ 自动纠正为 done
     if (patch.oaResult && body.status !== 'done' && body.status !== 'blocked' && patch.oaScore == null) {
       const detected = autoDetectStatus(patch.oaResult);
       if (detected.autoDetected && detected.status === 'done') {
         patch.status = 'done' as any;
-        patch.completedBy = existing.owner || '当前用户';
+        patch.completedBy = currentUser?.name || existing.owner || '未知用户';
         patch.completedAt = now;
         patch.oaScore = detected.score;
         patch.oaAutoDetected = true;
@@ -161,6 +257,21 @@ export async function PUT(
     }
 
     const updated = await updateActionItem(targetActionId, patch);
+
+    // ── 完成闭环通知：首次标记"已完成"时异步通知提出人（企微卡片，不阻塞提交）──
+    if (body.status === 'done' && existing.status !== 'done') {
+      void import('@/lib/wecom-action-push').then(m =>
+        m.notifyProposerOnComplete({
+          actionId: targetActionId,
+          description: (updated?.description ?? existing.description) || '',
+          ownerName: updated?.owner ?? existing.owner ?? null,
+          proposerName: updated?.proposer ?? existing.proposer ?? null,
+          dueDate: updated?.dueDate ?? existing.dueDate ?? null,
+          resultRemark: String(body.oa_result ?? existing.oaResult ?? ''),
+          meetingId: updated?.meetingId ?? existing.meetingId ?? null,
+        })
+      ).catch(() => { /* 后台通知失败不影响提交 */ });
+    }
 
     // ── 行动项「未完成 + 下次完成时间」→ 自动重派（打X + 生成新记录），与 OA 回拉逻辑一致 ──
     let rescheduled = false;
@@ -197,14 +308,16 @@ export async function PUT(
         // cycle_date 仍是填报当天（事实不可改）；data_month 标明这条填报属于哪个月的数据
         // 例：8/17 填的 7 月内容 → cycle_date=2026-08-17, data_month=2026-07
         const monthlyMonth = await resolveMonthlyCycleMonth(existing);
+        const isNoneFill = body.oa_none === true; // 持续项填报「无进展/无完成情况」：仅系统内结构化选择会置 true
         await upsertContinuousProgress({
           actionId: progressActionId,
           cycleDate,
           oaTaskId: `MYTODO_${targetActionId}_${cycleDate}`,
-          progress: patch.oaResult ?? null,
+          progress: isNoneFill ? '无' : (patch.oaResult ?? null),
           oaStatus: patch.status === 'done' ? 2 : (patch.status === 'in_progress' ? 1 : null),
           source: '会议助手',
           dataMonth: monthlyMonth || null,
+          isNone: isNoneFill,
         });
         console.log(`[actions/${targetActionId}] 持续项「我的待办」汇报已写入周期进展表 cycleDate=${cycleDate} dataMonth=${monthlyMonth || '无'}`);
       } catch (e) {
@@ -216,21 +329,36 @@ export async function PUT(
     const desc = (updated?.description || existing.description || '').slice(0, 30);
     const beforeScore = existing.oaScore ?? null;
     const afterScore = updated?.oaScore ?? null;
+    // 汇报/稽核均记一条完整上下文：操作人来自会话（logOperation 内取），责任人、节点、来源一并入 detail
+    const reportBase = {
+      owner: updated?.owner ?? existing.owner,
+      dept: updated?.dept ?? existing.dept,
+      dueDate: updated?.dueDate ?? existing.dueDate,
+      meetingId: existing.meetingId,
+      source: existing.sourceType || 'meeting',
+      description: updated?.description ?? existing.description,
+      result: (body.oa_result || existing.oaResult || '')?.toString().slice(0, 200) || null,
+      attachments: Array.isArray(body.oa_attachments) ? body.oa_attachments.length : undefined,
+      rescheduled: rescheduled || undefined,
+      rescheduledTo: rescheduled ? undefined : (rescheduledError || undefined),
+    };
     if (body.oa_score !== undefined && afterScore !== beforeScore) {
       await logOperation({
         action: 'audit',
         targetType: 'action_item',
         targetId: updated?.id || targetActionId,
         summary: `人工稽核 ${fmtScore(beforeScore)} → ${fmtScore(afterScore)}：${desc}`,
-        detail: { before: beforeScore, after: afterScore, description: updated?.description, autoDetected: updated?.oaAutoDetected },
+        detail: { before: beforeScore, after: afterScore, autoDetected: updated?.oaAutoDetected, ...reportBase },
       });
     } else if (body.status !== undefined && updated?.status !== existing.status) {
+      const statusLabel: Record<string, string> = { done: '已完成', blocked: '未完成', in_progress: '进行中', pending: '未处理' };
+      const newStatus = updated?.status ?? '';
       await logOperation({
         action: 'status_change',
         targetType: 'action_item',
         targetId: updated?.id || targetActionId,
-        summary: `状态 ${existing.status} → ${updated?.status}：${desc}`,
-        detail: { before: existing.status, after: updated?.status, description: updated?.description },
+        summary: `${statusLabel[existing.status] || existing.status} → ${statusLabel[newStatus] || newStatus}（${reportBase.owner || '待分配'}）：${desc}`,
+        detail: { before: existing.status, after: newStatus, ...reportBase },
       });
     } else if (body.owner !== undefined && updated?.owner !== existing.owner) {
       await logOperation({
@@ -238,7 +366,16 @@ export async function PUT(
         targetType: 'action_item',
         targetId: updated?.id || targetActionId,
         summary: `责任人 ${existing.owner || '空'} → ${updated?.owner || '空'}：${desc}`,
-        detail: { before: existing.owner, after: updated?.owner, description: updated?.description },
+        detail: { before: existing.owner, after: updated?.owner, ...reportBase },
+      });
+    } else if (body.oa_result !== undefined) {
+      // 仅更新汇报内容（状态/稽核没变）也要留痕，谁在什么时候补交/修改了汇报
+      await logOperation({
+        action: 'report',
+        targetType: 'action_item',
+        targetId: updated?.id || targetActionId,
+        summary: `提交汇报（${reportBase.owner || '待分配'}）：${desc}`,
+        detail: reportBase,
       });
     }
     // ── 操作日志结束 ──
@@ -375,6 +512,24 @@ export async function DELETE(
       if (fallback) {
         existing = fallback;
         targetActionId = fallback.id;
+      }
+    }
+
+    // JSON-only 项：无台账行，仅从会议 JSON 移除即可（不产生 404，避免前端"删不掉"）
+    if (!existing && meetingId) {
+      const meeting = await getMeetingById(meetingId);
+      const legacy = meeting ? (meeting.actionItems || []).find((it: any) => it.id === actionId) : null;
+      if (legacy && meeting) {
+        const items = (meeting.actionItems || []).filter((it: any) => it.id !== actionId);
+        await updateMeeting(meetingId, { actionItems: items });
+        await logOperation({
+          action: 'delete',
+          targetType: 'action_item',
+          targetId: actionId,
+          summary: `删除行动项（仅会议JSON，无台账行）：${(legacy.description || '').slice(0, 30)}`,
+          detail: { description: legacy.description },
+        });
+        return NextResponse.json({ success: true, data: { cancelled: false, jsonOnly: true } });
       }
     }
 

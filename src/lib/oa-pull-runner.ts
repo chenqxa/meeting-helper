@@ -13,6 +13,7 @@ export async function rescheduleActionItem(
     sourceId?: string | null;
     meetingId?: string | null;
     originalId?: string | null;
+    dueDate?: string | null;
     dueDateType?: string | null;
     description?: string | null;
     owner?: string | null;
@@ -31,6 +32,12 @@ export async function rescheduleActionItem(
 ): Promise<{ ok: boolean; newItemId?: string; error?: string }> {
   try {
     if (!nextDueDate) return { ok: false, error: '缺少下次完成时间' };
+    // 新节点必须晚于原节点：同节点转派会在台账里产生重复行（原X项 + 同日期新V项）
+    const origDue = String(dbItem.dueDate || '').slice(0, 10);
+    const nextDue = String(nextDueDate).slice(0, 10);
+    if (origDue && nextDue <= origDue) {
+      return { ok: false, error: `下次完成时间（${nextDue}）必须晚于原节点（${origDue}），已在同节点留痕，无需转派` };
+    }
     await updateActionItem(dbItem.id, { oaScore: -1, oaAutoDetected: true } as any);
 
     // 重派时按当前组织架构固化责任人部门（快照，避免脏 dept 或部门漂移）
@@ -87,6 +94,22 @@ export async function rescheduleActionItem(
 
     await updateActionItem(dbItem.id, { reassignedTo: newItem.id } as any);
     console.log(`[reschedule] 未完成自动重派: ${dbItem.id} → ${newItem.id} (下次 ${nextDueDate})`);
+    try {
+      await logOperation({
+        action: 'reschedule',
+        targetType: 'action_item',
+        targetId: dbItem.id,
+        summary: `未完成自动重派（${dbItem.owner || '待分配'}，${String(dbItem.dueDate || '').slice(0, 10)} → ${nextDue}）：${(dbItem.description || '').slice(0, 30)}`,
+        detail: {
+          fromId: dbItem.id, toId: newItem.id,
+          before: dbItem.dueDate, after: nextDue,
+          owner: dbItem.owner, dept: dbItem.dept,
+          meetingId: dbItem.meetingId,
+          source: dbItem.sourceType || 'meeting',
+          description: dbItem.description,
+        },
+      });
+    } catch { /* 日志失败不影响重派 */ }
     return { ok: true, newItemId: newItem.id };
   } catch (e) {
     console.warn(`[reschedule] 未完成重派失败 ${dbItem.id}:`, e instanceof Error ? e.message : e);
@@ -170,13 +193,8 @@ export async function executeOaPullResults(cursorAt?: string | null): Promise<Oa
         ? String(oaRow.modedatamodifydatetime)
         : new Date().toISOString();
 
-      const oaBase = process.env.WEAVER_OA_URL || '';
-      const fileIds: string[] = oaRow.wcqkfj
-        ? String(oaRow.wcqkfj).split(',').map((s: string) => s.trim()).filter(Boolean)
-        : [];
-      const attachments = fileIds.map(fid =>
-        oaBase ? `${oaBase}/weaver/weaver.file.FileDownload?fileid=${fid}` : fid
-      );
+      // 附件不再从 OA 回拉覆盖：用户现均在系统内填报（附件存本系统），
+      // OA 直链（weaver.file.FileDownload）无会话打不开，历史上曾把本地上传的附件顶掉导致"碎片"
 
       const dbItem = dbItemMap.get(taskId) || dbItemMap.get(`${meetingId}__${itemKey}`);
       if (dbItem) {
@@ -191,7 +209,6 @@ export async function executeOaPullResults(cursorAt?: string | null): Promise<Oa
             ...(newStatus ? { status: newStatus as any } : {}),
             oaResult: newResult || dbItem.oaResult,
             oaResultAt: oaResultAt,
-            oaAttachments: attachments.length > 0 ? attachments : (dbItem.oaAttachments || []),
             ...(oaRow.status >= 2 && dbItem.oaScore == null
               ? { oaScore: 1, oaAutoDetected: true }
               : {}),
@@ -232,7 +249,6 @@ export async function executeOaPullResults(cursorAt?: string | null): Promise<Oa
         ...(newStatus ? { status: newStatus } : {}),
         oa_result: newResult || target.oa_result,
         oa_result_at: oaResultAt,
-        oa_attachments: attachments.length > 0 ? attachments : (target.oa_attachments || []),
         ...(oaRow.status >= 2 && target.oa_score == null
           ? { oa_score: 1, oa_auto_detected: true }
           : {}),

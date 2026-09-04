@@ -13,6 +13,9 @@ import {
 import { cn } from '@/lib/utils';
 import { getActionDisplayStatus } from '@/lib/action-status';
 import SlideFrame from '@/components/slide-frame';
+import BoardBigTextToggle from '@/components/board-big-text-toggle';
+import ActionDoneDetailDialog from '@/components/board/action-done-detail-dialog';
+import ContinuousDetailDialog from '@/components/board/continuous-detail-dialog';
 
 // ── 数据结构（与 /api/actions 返回一致，仅取演示所需字段）──
 interface BoardItem {
@@ -30,6 +33,12 @@ interface BoardItem {
   meeting_type?: string;
   oa_score?: number | null;
   oa_result?: string | null;
+  // 完成详情（后端 /api/actions 已返回；详情弹窗展示用）
+  completed_at?: string | null;
+  completed_by?: string | null;
+  completion_note?: string | null;
+  oa_attachments?: (string | null)[] | null;
+  evidence_files?: (string | null)[] | null;
 }
 
 // ── 工具函数 ──
@@ -38,17 +47,23 @@ function formatDate(d: string | null | undefined) {
   return d.slice(0, 10).replace(/-/g, '/');
 }
 
-function weekRange(d = new Date()) {
+// 周例会统计周期（自然周口径）：汇报「d 所在周的上一自然周」，即上周一 ~ 上周日。
+// 如 8/24（周一）开会 → 统计 8/17~8/23 的任务（开会周 = N，数据周 = N-1）
+function weekPeriod(d = new Date()) {
   const date = new Date(d);
   date.setHours(0, 0, 0, 0);
   const day = (date.getDay() + 6) % 7; // 周一=0
   const monday = new Date(date);
-  monday.setDate(date.getDate() - day);
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-  sunday.setHours(23, 59, 59, 999);
-  return { monday, sunday };
+  monday.setDate(date.getDate() - day); // d 所在周的周一
+  const start = new Date(monday);
+  start.setDate(monday.getDate() - 7);  // 上一周周一
+  const end = new Date(monday);
+  end.setDate(monday.getDate() - 1);    // 上一周周日
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
 }
+
+const fmtDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // ISO 周序号（用于标题展示「第N周」）
 function getISOWeekNumber(d = new Date()): number {
@@ -103,10 +118,12 @@ const priorityMeta = (p: string) => PRIORITY_META[p] ?? PRIORITY_META.medium;
 
 // ─────────────────────────────────────────────────────────────
 // ── 第 1 页：统计汇总 ──
-function StatsSlide({ items, contItems = [], progressMap = {} }: {
+function StatsSlide({ items, contItems = [], progressMap = {}, period, contPeriodText }: {
   items: BoardItem[];
   contItems?: BoardItem[];
-  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>;
+  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  period?: { start: Date; end: Date };
+  contPeriodText?: string; // 持续项填报窗口展示（与行动项数据周区分）
 }) {
   const stats = useMemo(() => {
     // 按「打X/V/0」判定：V(1)/status=done 视为已处理；?(待定)不归属任何板块，仅未稽核(null)视为待办
@@ -114,27 +131,17 @@ function StatsSlide({ items, contItems = [], progressMap = {} }: {
     const done = items.filter(i => isDone(i));
     const xItems = items.filter(i => effectiveScore(i) === -1);           // 未完成项（打X，与台账操作栏一致）
     const pending = items.filter(i => !isDone(i) && effectiveScore(i) !== -1 && !isExcluded(i)); // 待办（排除打X/打0）
-    const { monday, sunday } = weekRange();
+    const win = period ?? weekPeriod(new Date());
     const dueThisWeek = pending.filter(i =>
       i.due_date && (i.due_date_type || 'date') === 'date' &&
-      new Date(i.due_date) >= monday && new Date(i.due_date) <= sunday
+      new Date(i.due_date) >= win.start && new Date(i.due_date) <= win.end
     ).length;
     const high = pending.filter(i => i.priority === 'high').length;
 
-    // 持续项统计：已完成（打V 或 done）/ 待跟进（其余）；打0待定不归属任何板块，不计入总数
-    const contCounted = contItems.filter(i => !isExcluded(i));
-    const contDone = contCounted.filter(i => isDone(i));
-    const contPending = contCounted.filter(i => !isDone(i));
-    // 上周已填报数（周例会周一开，统计上周周期的填报，按 progress 表 cycleDate 判断）
-    const ref = new Date();
-    ref.setDate(ref.getDate() - 7);
-    const { monday: lastMonday, sunday: lastSunday } = weekRange(ref);
-    const contFilledThisWeek = contItems.filter(i => {
-      const pr = progressMap[i.id];
-      if (!pr?.cycleDate) return false;
-      const d = new Date(pr.cycleDate + 'T00:00:00');
-      return d >= lastMonday && d <= lastSunday;
-    }).length;
+    // 持续项统计：不用「已完成/未完成」口径（该口径仅行动项有节点才有），持续项按本期填报情况统计
+    // 本周期已填报数：progressMap 已按统计周期过滤，有记录即在周期内填报过
+    const contFilledThisWeek = contItems.filter(i => !!progressMap[i.id]).length;
+    const contUnfilledThisWeek = contItems.length - contFilledThisWeek;
 
     // 按部门分布（未处理）
     const byDept: Record<string, number> = {};
@@ -154,8 +161,8 @@ function StatsSlide({ items, contItems = [], progressMap = {} }: {
     const pTotal = pHigh + pMed + pLow || 1;
 
     return { pending: pending.length, done: done.length, dueThisWeek, xItems: xItems.length, high, deptRows, deptMax, pHigh, pMed, pLow, pTotal,
-             contTotal: contCounted.length, contDone: contDone.length, contPending: contPending.length, contFilledThisWeek };
-  }, [items, contItems, progressMap]);
+             contTotal: contItems.length, contFilledThisWeek, contUnfilledThisWeek };
+  }, [items, contItems, progressMap, period]);
 
   const cards = [
     { label: '待办（未处理）', value: stats.pending, icon: ClipboardList, color: 'text-blue-600', bg: 'bg-blue-50', ring: 'ring-blue-100' },
@@ -164,9 +171,9 @@ function StatsSlide({ items, contItems = [], progressMap = {} }: {
     { label: '未完成项', value: stats.xItems, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
   ];
   const contCards = [
-    { label: '持续项·待跟进', value: stats.contPending, icon: RefreshCw, color: 'text-amber-600', bg: 'bg-amber-50', ring: 'ring-amber-100' },
-    { label: '持续项·已完成', value: stats.contDone, icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
-    { label: '上周已填报', value: stats.contFilledThisWeek, icon: CalendarClock, color: 'text-blue-600', bg: 'bg-blue-50', ring: 'ring-blue-100' },
+    { label: '持续项总数', value: stats.contTotal, icon: RefreshCw, color: 'text-slate-600', bg: 'bg-slate-50', ring: 'ring-slate-100' },
+    { label: '本周期已填报', value: stats.contFilledThisWeek, icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
+    { label: '本周期未填报', value: stats.contUnfilledThisWeek, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
   ];
 
   return (
@@ -199,7 +206,7 @@ function StatsSlide({ items, contItems = [], progressMap = {} }: {
           <div className="col-span-12">
             <div className="flex items-center gap-2 mb-2">
               <RefreshCw className="w-4 h-4 text-slate-400" />
-              <h3 className="text-base font-bold text-slate-700">持续项（{stats.contTotal} 项）</h3>
+              <h3 className="text-base font-bold text-slate-700">持续项（{stats.contTotal} 项 · 填报窗口 {contPeriodText || '—'}）</h3>
             </div>
             <div className="grid grid-cols-3 gap-4">
               {contCards.map(c => (
@@ -357,23 +364,37 @@ function SectionRow({ title, count, tone }: { title: string; count: number; tone
   );
 }
 
-function Row({ it, no, newDue }: { it: BoardItem; no: string; newDue?: string | null }) {
+function Row({ it, no, newDue, onClick }: { it: BoardItem; no: string; newDue?: string | null; onClick?: (it: BoardItem) => void }) {
   return (
-    <tr className="border-b border-slate-100 hover:bg-slate-50/60 transition-colors">
+    <tr
+      onClick={onClick ? () => onClick(it) : undefined}
+      className={cn(
+        '[&>td]:border-b [&>td]:border-slate-100 transition-colors',
+        onClick ? 'cursor-pointer hover:bg-emerald-50/40' : 'hover:bg-slate-50/60'
+      )}
+    >
       <td className="text-center py-2.5 px-2"><span className="text-base font-semibold text-slate-300 tabular-nums">{no}</span></td>
       <td className="text-left py-2.5 px-2 text-[17px] font-medium text-slate-800 leading-snug">{it.description}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-500">{it.dept || '—'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-700">{it.owner || '待分配'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-600">{formatDateCN(it.due_date)}</td>
       <td className="text-center py-2.5 px-2 text-base">
-        {newDue ? <span className="font-semibold text-blue-600">{formatDateCN(newDue)}</span> : <span className="text-slate-300">—</span>}
+        {onClick ? (
+          <span className="inline-flex items-center gap-0.5 font-medium text-emerald-600 whitespace-nowrap">
+            查看详情<ChevronRight className="w-3.5 h-3.5" />
+          </span>
+        ) : newDue ? (
+          <span className="font-semibold text-blue-600">{formatDateCN(newDue)}</span>
+        ) : (
+          <span className="text-slate-300">—</span>
+        )}
       </td>
     </tr>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-function OverdueNoticeSlide({ items, doneItems, allItems, weekNum, stats }: { items: BoardItem[]; doneItems: BoardItem[]; allItems: BoardItem[]; weekNum: number; stats: WeekStats }) {
+function OverdueNoticeSlide({ items, doneItems, allItems, weekNum, stats, onDoneClick }: { items: BoardItem[]; doneItems: BoardItem[]; allItems: BoardItem[]; weekNum: number; stats: WeekStats; onDoneClick?: (it: BoardItem) => void }) {
   const rows = items;
   const doneRows = doneItems || [];
   const up = stats.diff >= 0;
@@ -406,23 +427,23 @@ function OverdueNoticeSlide({ items, doneItems, allItems, weekNum, stats }: { it
         </div>
       </div>
 
-      {/* ── 表格区：打X项 /?/ 未处理项 两个板块 ── */}
-      <div className="flex-1 min-h-0 px-7 pt-3 pb-2 overflow-y-auto custom-scrollbar">
-        {rows.length === 0 ? (
+      {/* ── 表格区：打X项 /?/ 未处理项 / 已完成项 三个板块 ── */}
+      <div className="flex-1 min-h-0 px-7 pb-2 overflow-y-auto custom-scrollbar">
+        {(rows.length === 0 && doneRows.length === 0) ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
             <CheckCircle2 className="w-10 h-10 text-emerald-400" />
             <span className="text-base">第 {weekNum} 周无未完成项</span>
           </div>
         ) : (
-          <table className="w-full border-collapse">
+          <table className="w-full border-separate border-spacing-0">
             <thead>
-              <tr className="text-base text-slate-500 border-b border-slate-200 bg-slate-50/70">
-                <th className="text-center font-semibold py-2 px-2 w-10">No.</th>
-                <th className="text-left font-semibold py-2 px-2">项目内容</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">责任部门</th>
-                <th className="text-center font-semibold py-2 px-2 w-20">责任人</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">原节点</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">新节点</th>
+              <tr className="text-base text-slate-500">
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-10 bg-slate-50 border-b border-slate-200">No.</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">项目内容</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">责任部门</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">责任人</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">原节点</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">新节点</th>
               </tr>
             </thead>
             <tbody>
@@ -442,7 +463,7 @@ function OverdueNoticeSlide({ items, doneItems, allItems, weekNum, stats }: { it
               {doneRows.length === 0 ? (
                 <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
               ) : doneRows.map((it, i) => (
-                <Row key={it.id} it={it} no={String(i + 1).padStart(2, '0')} />
+                <Row key={it.id} it={it} no={String(i + 1).padStart(2, '0')} onClick={onDoneClick} />
               ))}
             </tbody>
           </table>
@@ -496,10 +517,12 @@ function Metric({ label, value, unit, tone }: { label: string; value: string; un
 // ─────────────────────────────────────────────────────────────
 // ── 第 2 页：持续项跟进（周会来源的持续执行事项）──
 // ─────────────────────────────────────────────────────────────
-function ContinuousSlide({ items, mode, progressMap }: {
+function ContinuousSlide({ items, mode, progressMap, periodText, onShowDetail }: {
   items: BoardItem[];
   mode: 'done' | 'pending';
-  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>;
+  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  periodText?: string; // 填报窗口展示（如 8/25~8/31）
+  onShowDetail?: (pr: { progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null }) => void; // 自动取数明细点击（本周N张 → 弹表格）
 }) {
   const rows = items;
   const isDone = mode === 'done';
@@ -508,9 +531,9 @@ function ContinuousSlide({ items, mode, progressMap }: {
   const iconColor = isDone ? 'text-emerald-400' : 'text-amber-400';
   const badgeBg = isDone ? 'bg-emerald-500/15 ring-emerald-400/30' : 'bg-amber-500/15 ring-amber-400/30';
   const icon = isDone ? RefreshCw : Clock;
-  const subtitle = isDone ? 'COMPLETED · 已完成持续项' : 'PENDING · 未完成持续项';
-  const badgeText = isDone ? '已完成' : '未完成';
-  const title = isDone ? '持续项跟进·已完成' : '持续项跟进·未完成';
+  const subtitle = isDone ? 'CONTINUOUS · 持续项稽核' : `CONTINUOUS · 持续项填报汇报（${periodText || '本期'}）`;
+  const badgeText = isDone ? '稽核' : '汇报中';
+  const title = isDone ? '持续项稽核' : '持续项汇报';
   const IconComp = icon;
   const dotColor = isDone ? 'bg-emerald-500' : 'bg-amber-500';
   return (
@@ -532,29 +555,29 @@ function ContinuousSlide({ items, mode, progressMap }: {
       </div>
 
       {/* 表格区 */}
-      <div className="flex-1 min-h-0 px-7 pt-4 overflow-y-auto custom-scrollbar">
+      <div className="flex-1 min-h-0 px-7 pb-4 overflow-y-auto custom-scrollbar">
         {rows.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
             <CheckCircle2 className="w-10 h-10 text-slate-300" />
-            <span className="text-base">暂无{isDone ? '已完成' : '未完成'}持续项</span>
+            <span className="text-base">暂无{isDone ? '待稽核' : '可汇报'}持续项</span>
           </div>
         ) : (
-          <table className="w-full border-collapse">
-            <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_0_#e2e8f0]">
-              <tr className="text-lg uppercase tracking-wider text-slate-500 border-b-2 border-slate-200 bg-white">
-                <th className="text-center font-bold py-2.5 px-2 w-10">No.</th>
-                <th className="text-center font-bold py-2.5 px-2 w-20">日期</th>
-                <th className="text-center font-bold py-2.5 px-2 w-20">提出人</th>
-                <th className="text-left font-bold py-2.5 px-2">提议内容</th>
-                <th className="text-center font-bold py-2.5 px-2 w-16">节点</th>
-                <th className="text-center font-bold py-2.5 px-2 w-24">部门</th>
-                <th className="text-center font-bold py-2.5 px-2 w-28 whitespace-nowrap">责任人</th>
-                <th className="text-center font-bold py-2.5 px-2 w-48">{isDone ? '稽核' : '完成情况'}</th>
+          <table className="w-full border-separate border-spacing-0">
+            <thead>
+              <tr className="text-lg uppercase tracking-wider text-slate-500">
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-10 bg-white border-b-2 border-slate-200">No.</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-20 bg-white border-b-2 border-slate-200">日期</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-20 bg-white border-b-2 border-slate-200">提出人</th>
+                <th className="sticky top-0 z-10 text-left font-bold py-2.5 px-2 bg-white border-b-2 border-slate-200">提议内容</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-16 bg-white border-b-2 border-slate-200">节点</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-24 bg-white border-b-2 border-slate-200">部门</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-28 whitespace-nowrap bg-white border-b-2 border-slate-200">责任人</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-48 bg-white border-b-2 border-slate-200">{isDone ? '稽核' : '本期填报'}</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((it, i) => (
-                <tr key={it.id} className="border-b border-slate-100 hover:bg-slate-50/70 transition-colors group">
+                <tr key={it.id} className="[&>td]:border-b [&>td]:border-slate-100 hover:bg-slate-50/70 transition-colors group">
                   <td className="text-center py-2.5 px-2">
                     <div className="flex items-center justify-center gap-1.5">
                       <span className={`w-1.5 h-1.5 rounded-full ${dotColor} flex-shrink-0 group-hover:scale-125 transition-transform`} />
@@ -589,10 +612,27 @@ function ContinuousSlide({ items, mode, progressMap }: {
                         {it.oa_score === 1 ? 'V' : it.oa_score === -1 ? 'X' : it.oa_score === 0 ? '0' : '-'}
                       </span>
                     ) : (
-                      <div className="w-48" title={progressMap?.[it.id]?.progress || it.oa_result || undefined}>
+                      <div className="w-48" title={progressMap?.[it.id]?.progress || undefined}>
                         {(() => {
+                          // progressMap 已按统计周期（上周二~本周一）过滤：周期内有填报才显示，否则视为本周期未填报
                           const pr = progressMap?.[it.id];
                           if (pr?.progress) {
+                            // 自动取数：格子只显示简短汇总，点击弹明细表格
+                            const hasDetail = Array.isArray(pr.detail) && pr.detail.length > 0;
+                            if (hasDetail && onShowDetail) {
+                              return (
+                                <div className="space-y-0.5">
+                                  <button
+                                    onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
+                                    className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
+                                    title="查看本周明细"
+                                  >
+                                    {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
+                                  </button>
+                                  <p className="text-[13px] text-slate-400">{pr.cycleDate} 填报</p>
+                                </div>
+                              );
+                            }
                             return (
                               <div className="space-y-0.5">
                                 <p className="text-base text-slate-700 leading-snug line-clamp-3">{pr.progress}</p>
@@ -600,18 +640,8 @@ function ContinuousSlide({ items, mode, progressMap }: {
                               </div>
                             );
                           }
-                          const fallback = it.oa_result || '';
-                          // 导入元数据（{"y":..,"w":..,"d":..} 年/周/日期 JSON）不算填报内容
-                          const isMetaJson = (() => {
-                            if (!fallback || !fallback.trim().startsWith('{')) return false;
-                            try { const j = JSON.parse(fallback); return !!(j.y || j.w || j.d); } catch { return false; }
-                          })();
-                          return fallback && !isMetaJson ? (
-                            <div className="space-y-0.5">
-                              <p className="text-base text-slate-700 leading-snug line-clamp-3">{fallback}</p>
-                              <p className="text-[13px] text-slate-400">{it.meeting_date ? formatDateCN(it.meeting_date) + ' 填报' : ''}</p>
-                            </div>
-                          ) : (
+                          // 周期内无 progress 记录：即使台账项上有旧的 oa_result（上个周期的填报）也按本周期未填报显示
+                          return (
                             <span className="inline-flex items-center gap-1 text-base px-1.5 py-0.5 rounded-full border border-amber-200 text-amber-600 bg-amber-50">未填报</span>
                           );
                         })()}
@@ -694,36 +724,34 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 // ─────────────────────────────────────────────────────────────
 export default function WeeklyBoardPage() {
   const [items, setItems] = useState<BoardItem[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>>({});
+  // 持续项全部周期填报记录（actionId → 按周期过滤后取展示）
+  const [progressAll, setProgressAll] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }[]>>({});
   const [loading, setLoading] = useState(true);
   const [immersive, setImmersive] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [api, setApi] = useState<CarouselApi>();
   const [current, setCurrent] = useState(0);
   const [count, setCount] = useState(0);
+  const [weekOffset, setWeekOffset] = useState(0); // 0=默认数据周期(最近一个已开周期)，1=再往前一个周期
   const deckRef = useRef<HTMLDivElement>(null);
+  const [doneDetail, setDoneDetail] = useState<BoardItem | null>(null); // 点开「已完成项」详情
+  const [contDetail, setContDetail] = useState<{ progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null } | null>(null); // 点开持续项自动取数明细
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const r = await fetch('/api/actions').then(r => r.json());
       if (r.success) setItems(r.data || []);
-      // 拉取持续项周期填报进展（actionId → 进展列表）
+      // 拉取持续项周期填报进展（actionId → 进展列表），保留全部记录按统计周期过滤
       const pr = await fetch('/api/continuous/progress').then(r => r.json());
       if (pr.success) {
-        const map: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }> = {};
+        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }[]> = {};
         for (const [actionId, recs] of Object.entries(pr.data || {})) {
-          const list = (recs as any[]);
-          const latest = list.sort((a, b) => String(b.cycleDate).localeCompare(String(a.cycleDate)))[0];
-          if (latest) {
-            map[actionId] = {
-              progress: latest.progress || null,
-              cycleDate: latest.cycleDate,
-              syncedAt: latest.syncedAt,
-            };
-          }
+          map[actionId] = ((recs as any[]) || [])
+            .filter(x => x.cycleDate)
+            .map(x => ({ progress: x.progress || null, cycleDate: String(x.cycleDate).slice(0, 10), syncedAt: x.syncedAt, detail: x.detail ?? null }));
         }
-        setProgressMap(map);
+        setProgressAll(map);
       }
     } catch { /* silent */ }
     setLoading(false);
@@ -805,7 +833,7 @@ export default function WeeklyBoardPage() {
     [items]
   );
 
-  // 持续项：未完成（周会/周例会/手动导入）
+  // 持续项：需按期填报汇报的持续执行项（周会/周例会/手动导入；无「已完成/未完成」口径，取消/关闭的不再汇报）
   const continuousPendingItems = useMemo(
     () => items.filter(i => {
       const mt = i.meeting_type || '';
@@ -818,11 +846,43 @@ export default function WeeklyBoardPage() {
     [items]
   );
 
-  // 上周节点到期（截止日落在上一周）的未完成项；按节点日期统计
+  // 数据统计周期：锚定「今天」，永远显示今天的上一自然周（上周一~上周日）；weekOffset 可翻历史周期
+  const dataPeriod = useMemo(() => {
+    const base = weekPeriod(new Date());
+    if (weekOffset === 0) return base;
+    const shift = weekOffset * 7;
+    const start = new Date(base.start); start.setDate(start.getDate() - shift);
+    const end = new Date(base.end); end.setDate(end.getDate() - shift);
+    return { start, end };
+  }, [weekOffset]);
+
+  // 持续项填报窗口（与行动项数据周口径区分）：
+  // 行动项数据周 = 上自然周（周一~周日，如 8/24~8/30）；
+  // 持续项填报窗口 = 上次周例会次日 ~ 本次会议日，即数据周整体后移一天（周二~周一，如 8/25~8/31）。
+  // 前提：周例会固定周一召开（已写进需求文档；若例会日调整需同步改此口径）
+  const contPeriod = useMemo(() => {
+    const start = new Date(dataPeriod.start); start.setDate(start.getDate() + 1);
+    const end = new Date(dataPeriod.end); end.setDate(end.getDate() + 1);
+    return { start, end };
+  }, [dataPeriod]);
+  const contPeriodText = `${contPeriod.start.getMonth() + 1}/${contPeriod.start.getDate()}~${contPeriod.end.getMonth() + 1}/${contPeriod.end.getDate()}`;
+
+  // 填报窗口内的持续项填报（每项取窗口内最新一条）；窗口内无填报则不出现 → 显示"未填报"
+  const progressInWeek = useMemo(() => {
+    const s = fmtDate(contPeriod.start), e = fmtDate(contPeriod.end);
+    const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }> = {};
+    for (const [id, recs] of Object.entries(progressAll)) {
+      const inWeek = recs
+        .filter(r => r.cycleDate >= s && r.cycleDate <= e)
+        .sort((a, b) => b.cycleDate.localeCompare(a.cycleDate));
+      if (inWeek[0]) map[id] = inWeek[0];
+    }
+    return map;
+  }, [progressAll, contPeriod]);
+
+  // 数据周期内节点到期的未完成项
   const lastWeekItems = useMemo(() => {
-    const ref = new Date();
-    ref.setDate(ref.getDate() - 7);
-    const { monday, sunday } = weekRange(ref);
+    const { start, end } = dataPeriod;
     return items.filter(i => {
       if (i.meeting_type !== '周会' && i.meeting_type !== '周例会') return false;
       if (i.due_date_type === 'continuous') return false; // 第一页只核算行动项台账，不含持续项
@@ -832,48 +892,49 @@ export default function WeeklyBoardPage() {
       if (isExcluded(i)) return false; // 打0：周会不归属任何板块
       if (isDone(i)) return false; // 打 V 或状态 done = 已完成
       const dd = new Date(i.due_date.slice(0, 10));
-      return dd >= monday && dd <= sunday;
+      return dd >= start && dd <= end;
+    }).sort((a, b) => {
+      const o = (a.owner || '').localeCompare(b.owner || '', 'zh');
+      if (o !== 0) return o;
+      return (a.description || '').localeCompare(b.description || '', 'zh');
     });
-  }, [items]);
+  }, [items, dataPeriod]);
 
-  // 上周到期的已完成项（第一页新增「已完成」板块展示）
+  // 数据周期内到期的已完成项（第一页「已完成」板块展示）
   const lastWeekDoneItems = useMemo(() => {
-    const ref = new Date();
-    ref.setDate(ref.getDate() - 7);
-    const { monday, sunday } = weekRange(ref);
+    const { start, end } = dataPeriod;
     return items.filter(i => {
       if (i.meeting_type !== '周会' && i.meeting_type !== '周例会') return false;
       if (i.due_date_type === 'continuous' || i.due_date_type === 'tbd' || !i.due_date) return false;
       if (getActionDisplayStatus(i.status) === 'cancelled') return false;
       if (!isDone(i)) return false;
       const dd = new Date(i.due_date.slice(0, 10));
-      return dd >= monday && dd <= sunday;
+      return dd >= start && dd <= end;
+    }).sort((a, b) => {
+      const o = (a.owner || '').localeCompare(b.owner || '', 'zh');
+      if (o !== 0) return o;
+      return (a.description || '').localeCompare(b.description || '', 'zh');
     });
-  }, [items]);
+  }, [items, dataPeriod]);
 
-  // 上一周（数据周）的周序号，用于标题「第N周」
-  const lastWeekNum = useMemo(() => {
-    const ref = new Date();
-    ref.setDate(ref.getDate() - 7);
-    const { monday } = weekRange(ref);
-    return getISOWeekNumber(monday);
-  }, []);
+  // 数据周期的周序号（按周期截止的周一算），用于标题「第N周」
+  const lastWeekNum = useMemo(() => getISOWeekNumber(dataPeriod.end), [dataPeriod]);
 
-  // 底部统计：汇报周N → 数据周 N-1 → 对比周 N-2
-  // 数据周无完整数据时回退模拟数据（待数据连续后自动替换）
+  // 底部统计：数据周期（weekOffset 可翻） → 对比周期（前一个周期）
+  // 数据周期无完整数据时回退模拟数据（待数据连续后自动替换）
   const weekStats = useMemo<WeekStats>(() => {
-    // 算指定周次（相对当前周的偏移）周会完成率
-    const calcWeek = (offset: number) => {
-      const ref = new Date();
-      ref.setDate(ref.getDate() + offset * 7);
-      const { monday, sunday } = weekRange(ref);
+    // 算指定周期（相对当前数据周期向前翻 offsetWeeks 周）的周会完成率
+    // 周期与 dataPeriod 同源（今天锚定的自然周），保证完成率与页面周期一致
+    const calcPeriod = (offsetWeeks: number) => {
+      const start = new Date(dataPeriod.start); start.setDate(start.getDate() - offsetWeeks * 7);
+      const end = new Date(dataPeriod.end); end.setDate(end.getDate() - offsetWeeks * 7);
       const wkItems = items.filter(i => {
         if ((i.meeting_type !== '周会' && i.meeting_type !== '周例会')) return false;
         if (i.due_date_type === 'continuous') return false; // 仅核算行动项台账，不含持续项
         if (i.due_date_type === 'tbd' || !i.due_date) return false; // 日期未明确的不算任务项
         if (isExcluded(i)) return false; // 打0不计入目标数与完成率
         const dd = new Date(i.due_date.slice(0, 10));
-        return dd >= monday && dd <= sunday;
+        return dd >= start && dd <= end;
       });
       const total = wkItems.length;
       const cancelled = wkItems.filter(i => getActionDisplayStatus(i.status) === 'cancelled').length;
@@ -883,28 +944,27 @@ export default function WeeklyBoardPage() {
       return { total, valid, done, rate, hasData: total > 0 };
     };
 
-    const dataW = calcWeek(-1);   // 上周（数据周）
-    const compareW = calcWeek(-2); // 上上周（对比周）
+    const dataW = calcPeriod(0);        // 数据周期（dataPeriod 已含 weekOffset 偏移，不再重复偏移）
+    const compareW = calcPeriod(1);     // 对比周期（前一个）
 
-    const dataMonday = (() => { const d = new Date(); d.setDate(d.getDate() - 7); return weekRange(d).monday; })();
-    const dataYear = dataMonday.getFullYear();
-    const dataWeekNum = getISOWeekNumber(dataMonday);
+    const dataYear = dataPeriod.end.getFullYear();
+    const dataWeekNum = getISOWeekNumber(dataPeriod.end);
 
-    // 数据周无数据 → 模拟兜底
+    // 数据周期无数据 → 模拟兜底
     if (!dataW.hasData) {
       return { year: dataYear, weekNum: dataWeekNum, target: 32, done: 25, rate: 78.16, diff: 5, mock: true };
     }
     const rate = dataW.rate ?? 0;
     const diff = compareW.rate !== null ? rate - compareW.rate : 0;
     return { year: dataYear, weekNum: dataWeekNum, target: dataW.valid, done: dataW.done, rate, diff, mock: false };
-  }, [items]);
+  }, [items, dataPeriod]);
 
   // 幻灯片清单 —— 后续异构页在此追加
   const slides = useMemo(() => [
-    { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastWeekItems} doneItems={lastWeekDoneItems} allItems={items} weekNum={lastWeekNum} stats={weekStats} /> },
-    { id: 'continuous-pending', label: '持续项·未完成', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressMap} /> },
-    { id: 'stats', label: '总览', node: <StatsSlide items={weeklyItems} contItems={weeklyContItems} progressMap={progressMap} /> },
-  ], [weeklyItems, weeklyContItems, lastWeekItems, lastWeekDoneItems, lastWeekNum, weekStats, continuousPendingItems, progressMap]);
+    { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastWeekItems} doneItems={lastWeekDoneItems} allItems={items} weekNum={lastWeekNum} stats={weekStats} onDoneClick={setDoneDetail} /> },
+    { id: 'continuous-pending', label: '持续项汇报', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressInWeek} periodText={contPeriodText} onShowDetail={setContDetail} /> },
+    { id: 'stats', label: '总览', node: <StatsSlide items={weeklyItems} contItems={weeklyContItems} progressMap={progressInWeek} period={dataPeriod} contPeriodText={contPeriodText} /> },
+  ], [weeklyItems, weeklyContItems, lastWeekItems, lastWeekDoneItems, lastWeekNum, weekStats, continuousPendingItems, progressInWeek, dataPeriod, items, contPeriodText]);
 
   const goPrev = () => api?.scrollPrev();
   const goNext = () => api?.scrollNext();
@@ -937,6 +997,14 @@ export default function WeeklyBoardPage() {
             {loading && <span className="text-base opacity-60">加载中…</span>}
           </div>
           <div className="flex items-center gap-1.5">
+            <div className={cn(
+              'flex items-center gap-1 rounded-lg px-1.5 py-0.5 text-xs font-medium',
+              immersive ? 'bg-white/10 text-white' : 'bg-white border border-slate-200 text-slate-600'
+            )}>
+              <button onClick={() => setWeekOffset(o => o + 1)} title="上一周" className="px-1.5 hover:opacity-70 text-sm">‹</button>
+              <span className="px-1 tabular-nums">{weekStats.year}年 W{lastWeekNum}</span>
+              <button onClick={() => setWeekOffset(o => o - 1)} title="下一周" className="px-1.5 hover:opacity-70 text-sm">›</button>
+            </div>
             <ToolbarBtn onClick={load} title="刷新数据" immersive={immersive}>
               <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
             </ToolbarBtn>
@@ -951,6 +1019,7 @@ export default function WeeklyBoardPage() {
             <ToolbarBtn onClick={toggleImmersive} title="沉浸模式 (F)" immersive={immersive}>
               {immersive ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
             </ToolbarBtn>
+            <BoardBigTextToggle immersive={immersive} />
           </div>
         </div>
 
@@ -1007,6 +1076,11 @@ export default function WeeklyBoardPage() {
           </div>
         </div>
       </div>
+
+      {/* 已完成项详情弹窗（浮于投屏/沉浸层之上） */}
+      <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
+      {/* 持续项自动取数明细弹窗 */}
+      <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
     </DashboardLayout>
   );
 }

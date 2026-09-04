@@ -1,4 +1,6 @@
+
 import { NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 import sql from 'mssql';
 import {
   createDepartment, updateDepartment, deleteDepartmentCascade, getDepartments,
@@ -20,6 +22,9 @@ const EMP_TABLE  = 'FWsv.ecology.dbo.HrmResource';    // 人员表
 // POST /api/org/sync-db - 从泛微OA数据库直连同步
 export async function POST() {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
+
     if (!WEAVER_DB_HOST || !WEAVER_DB_USER || !WEAVER_DB_PASSWORD || !WEAVER_DB_NAME) {
       return NextResponse.json(
         { success: false, error: '未配置泛微OA数据库连接，请在.env文件中设置 WEAVER_DB_HOST、WEAVER_DB_USER、WEAVER_DB_PASSWORD、WEAVER_DB_NAME' },

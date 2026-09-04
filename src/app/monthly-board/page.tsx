@@ -13,6 +13,9 @@ import {
 import { cn } from '@/lib/utils';
 import { getActionDisplayStatus } from '@/lib/action-status';
 import SlideFrame from '@/components/slide-frame';
+import BoardBigTextToggle from '@/components/board-big-text-toggle';
+import ActionDoneDetailDialog from '@/components/board/action-done-detail-dialog';
+import ContinuousDetailDialog from '@/components/board/continuous-detail-dialog';
 
 // ── 数据结构（与 /api/actions 返回一致，仅取演示所需字段）──
 interface BoardItem {
@@ -30,6 +33,26 @@ interface BoardItem {
   meeting_type?: string;
   oa_score?: number | null;
   oa_result?: string | null;
+  // 完成详情（后端 /api/actions 已返回；详情弹窗展示用）
+  completed_at?: string | null;
+  completed_by?: string | null;
+  completion_note?: string | null;
+  oa_attachments?: (string | null)[] | null;
+  evidence_files?: (string | null)[] | null;
+}
+
+// ── 战略稽核（GSMALT）数据结构（与 /api/gsmalt 返回一致）──
+interface GsmaltItem {
+  kpi: string | null;
+  dept: string | null;
+  owner: string | null;
+  audit: number | null; // 原始稽核值：0=V 1=X 2=0
+  jd: string | null;    // 原节点
+  yyfx: string | null;  // 原因分析
+  xdjh: string | null;  // 行动计划
+  cl: string | null;    // 策略
+  hl: string | null;    // 衡量
+  newJd: string | null; // X 项新节点
 }
 
 // ── 工具函数 ──
@@ -87,7 +110,7 @@ const priorityMeta = (p: string) => PRIORITY_META[p] ?? PRIORITY_META.medium;
 function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' }: {
   items: BoardItem[];
   contItems?: BoardItem[];
-  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>;
+  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
   period?: 'week' | 'month';
 }) {
   const stats = useMemo(() => {
@@ -103,9 +126,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
     ).length;
     const high = pending.filter(i => i.priority === 'high').length;
 
-    // 持续项统计：已完成（打V/0 或 done）/ 待跟进（其余）
-    const contDone = contItems.filter(i => isDone(i));
-    const contPending = contItems.filter(i => !isDone(i));
+    // 持续项统计：不用「已完成/未完成」口径（该口径仅行动项有节点才有），持续项按上月填报情况统计
     // 上月已填报数（公司月会统计上月周期的填报，按 progress 表 cycleDate 判断）
     const lastRef = new Date();
     lastRef.setMonth(lastRef.getMonth() - 1);
@@ -116,6 +137,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
       const d = new Date(pr.cycleDate + 'T00:00:00');
       return d >= lastStart && d <= lastEnd;
     }).length;
+    const contUnfilledThisMonth = contItems.length - contFilledThisMonth;
 
     // 按部门分布（未处理）
     const byDept: Record<string, number> = {};
@@ -135,7 +157,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
     const pTotal = pHigh + pMed + pLow || 1;
 
     return { pending: pending.length, done: done.length, dueThisMonth, xItems: xItems.length, high, deptRows, deptMax, pHigh, pMed, pLow, pTotal,
-             contTotal: contItems.length, contDone: contDone.length, contPending: contPending.length, contFilledThisMonth };
+             contTotal: contItems.length, contFilledThisMonth, contUnfilledThisMonth };
   }, [items, contItems, progressMap]);
 
   const cards = [
@@ -145,9 +167,9 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
     { label: '未完成项', value: stats.xItems, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
   ];
   const contCards = [
-    { label: '持续项·待跟进', value: stats.contPending, icon: RefreshCw, color: 'text-amber-600', bg: 'bg-amber-50', ring: 'ring-amber-100' },
-    { label: '持续项·已完成', value: stats.contDone, icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
-    { label: '上月已填报', value: stats.contFilledThisMonth, icon: CalendarClock, color: 'text-blue-600', bg: 'bg-blue-50', ring: 'ring-blue-100' },
+    { label: '持续项总数', value: stats.contTotal, icon: RefreshCw, color: 'text-slate-600', bg: 'bg-slate-50', ring: 'ring-slate-100' },
+    { label: '上月已填报', value: stats.contFilledThisMonth, icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
+    { label: '上月未填报', value: stats.contUnfilledThisMonth, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
   ];
 
   return (
@@ -319,10 +341,11 @@ interface WeekStats {
 }
 
 // 未完成通报分块行（打X项 / 未处理项）
-function SectionRow({ title, count, tone }: { title: string; count: number; tone: 'red' | 'amber' }) {
+function SectionRow({ title, count, tone }: { title: string; count: number; tone: 'red' | 'amber' | 'emerald' }) {
   const c = {
     red:   { bar: 'bg-red-500',   text: 'text-red-700',   pill: 'bg-red-100 text-red-600',   band: 'bg-red-50/80' },
     amber: { bar: 'bg-amber-400', text: 'text-amber-700', pill: 'bg-amber-100 text-amber-600', band: 'bg-amber-50/80' },
+    emerald: { bar: 'bg-emerald-500', text: 'text-emerald-700', pill: 'bg-emerald-100 text-emerald-600', band: 'bg-emerald-50/80' },
   }[tone];
   return (
     <tr>
@@ -337,24 +360,39 @@ function SectionRow({ title, count, tone }: { title: string; count: number; tone
   );
 }
 
-function Row({ it, no, newDue }: { it: BoardItem; no: string; newDue?: string | null }) {
+function Row({ it, no, newDue, onClick }: { it: BoardItem; no: string; newDue?: string | null; onClick?: (it: BoardItem) => void }) {
   return (
-    <tr className="border-b border-slate-100 hover:bg-slate-50/60 transition-colors">
+    <tr
+      onClick={onClick ? () => onClick(it) : undefined}
+      className={cn(
+        '[&>td]:border-b [&>td]:border-slate-100 transition-colors',
+        onClick ? 'cursor-pointer hover:bg-emerald-50/40' : 'hover:bg-slate-50/60'
+      )}
+    >
       <td className="text-center py-2.5 px-2"><span className="text-base font-semibold text-slate-300 tabular-nums">{no}</span></td>
       <td className="text-left py-2.5 px-2 text-[17px] font-medium text-slate-800 leading-snug">{it.description}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-500">{it.dept || '—'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-700">{it.owner || '待分配'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-600">{formatDateCN(it.due_date)}</td>
       <td className="text-center py-2.5 px-2 text-base">
-        {newDue ? <span className="font-semibold text-blue-600">{formatDateCN(newDue)}</span> : <span className="text-slate-300">—</span>}
+        {onClick ? (
+          <span className="inline-flex items-center gap-0.5 font-medium text-emerald-600 whitespace-nowrap">
+            查看详情<ChevronRight className="w-3.5 h-3.5" />
+          </span>
+        ) : newDue ? (
+          <span className="font-semibold text-blue-600">{formatDateCN(newDue)}</span>
+        ) : (
+          <span className="text-slate-300">—</span>
+        )}
       </td>
     </tr>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-function OverdueNoticeSlide({ items, allItems, monthLabel, stats }: { items: BoardItem[]; allItems: BoardItem[]; monthLabel: string; stats: WeekStats }) {
+function OverdueNoticeSlide({ items, doneItems, allItems, monthLabel, stats, onDoneClick }: { items: BoardItem[]; doneItems: BoardItem[]; allItems: BoardItem[]; monthLabel: string; stats: WeekStats; onDoneClick?: (it: BoardItem) => void }) {
   const rows = items;
+  const doneRows = doneItems || [];
   const up = stats.diff >= 0;
   // 分两块：打X项（稽核 X）/ 未处理项（无标记）
   const blockedRows = rows.filter(it => effectiveScore(it) === -1);
@@ -381,23 +419,23 @@ function OverdueNoticeSlide({ items, allItems, monthLabel, stats }: { items: Boa
         </div>
       </div>
 
-      {/* ── 表格区：打X项 /?/ 未处理项 两个板块 ── */}
-      <div className="flex-1 min-h-0 px-7 pt-3 pb-2 overflow-y-auto custom-scrollbar">
-        {rows.length === 0 ? (
+      {/* ── 表格区：打X项 /?/ 未处理项 / 已完成项 三个板块 ── */}
+      <div className="flex-1 min-h-0 px-7 pb-2 overflow-y-auto custom-scrollbar">
+        {(rows.length === 0 && doneRows.length === 0) ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
             <CheckCircle2 className="w-10 h-10 text-emerald-400" />
             <span className="text-base">{monthLabel} 无未完成项</span>
           </div>
         ) : (
-          <table className="w-full border-collapse">
+          <table className="w-full border-separate border-spacing-0">
             <thead>
-              <tr className="text-base text-slate-500 border-b border-slate-200 bg-slate-50/70">
-                <th className="text-center font-semibold py-2 px-2 w-10">No.</th>
-                <th className="text-left font-semibold py-2 px-2">项目内容</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">责任部门</th>
-                <th className="text-center font-semibold py-2 px-2 w-20">责任人</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">原节点</th>
-                <th className="text-center font-semibold py-2 px-2 w-24">新节点</th>
+              <tr className="text-base text-slate-500">
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-10 bg-slate-50 border-b border-slate-200">No.</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">项目内容</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">责任部门</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">责任人</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">原节点</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">新节点</th>
               </tr>
             </thead>
             <tbody>
@@ -412,6 +450,12 @@ function OverdueNoticeSlide({ items, allItems, monthLabel, stats }: { items: Boa
                 <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
               ) : pendingRows.map((it, i) => (
                 <Row key={it.id} it={it} no={String(i + 1).padStart(2, '0')} />
+              ))}
+              <SectionRow title="✓ 已完成项" count={doneRows.length} tone="emerald" />
+              {doneRows.length === 0 ? (
+                <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+              ) : doneRows.map((it, i) => (
+                <Row key={it.id} it={it} no={String(i + 1).padStart(2, '0')} onClick={onDoneClick} />
               ))}
             </tbody>
           </table>
@@ -430,7 +474,7 @@ function OverdueNoticeSlide({ items, allItems, monthLabel, stats }: { items: Boa
           <Metric label="完成率" value={`${stats.rate.toFixed(1)}`} unit="%" tone="blue" />
           <div className="w-px h-7 bg-slate-300/70 flex-shrink-0" />
           <Metric
-            label="较上周"
+            label="较上月"
             value={`${up ? '↑' : '↓'} ${Math.abs(stats.diff).toFixed(1)}`}
             unit="%"
             tone={up ? 'emerald' : 'red'}
@@ -465,10 +509,11 @@ function Metric({ label, value, unit, tone }: { label: string; value: string; un
 // ─────────────────────────────────────────────────────────────
 // ── 第 2 页：持续项跟进（月会来源的持续执行事项）──
 // ─────────────────────────────────────────────────────────────
-function ContinuousSlide({ items, mode, progressMap }: {
+function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
   items: BoardItem[];
   mode: 'done' | 'pending';
-  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>;
+  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  onShowDetail?: (pr: { progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null }) => void; // 自动取数明细点击
 }) {
   const rows = items;
   const isDone = mode === 'done';
@@ -477,9 +522,9 @@ function ContinuousSlide({ items, mode, progressMap }: {
   const iconColor = isDone ? 'text-emerald-400' : 'text-amber-400';
   const badgeBg = isDone ? 'bg-emerald-500/15 ring-emerald-400/30' : 'bg-amber-500/15 ring-amber-400/30';
   const icon = isDone ? RefreshCw : Clock;
-  const subtitle = isDone ? 'COMPLETED · 已完成持续项' : 'PENDING · 未完成持续项';
-  const badgeText = isDone ? '已完成' : '未完成';
-  const title = isDone ? '持续项跟进·已完成' : '持续项跟进·未完成';
+  const subtitle = isDone ? 'CONTINUOUS · 持续项稽核' : 'CONTINUOUS · 持续项按周期填报汇报';
+  const badgeText = isDone ? '稽核' : '汇报中';
+  const title = isDone ? '持续项稽核' : '持续项汇报';
   const IconComp = icon;
   const dotColor = isDone ? 'bg-emerald-500' : 'bg-amber-500';
   return (
@@ -501,29 +546,29 @@ function ContinuousSlide({ items, mode, progressMap }: {
       </div>
 
       {/* 表格区 */}
-      <div className="flex-1 min-h-0 px-7 pt-4 overflow-y-auto custom-scrollbar">
+      <div className="flex-1 min-h-0 px-7 pb-4 overflow-y-auto custom-scrollbar">
         {rows.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
             <CheckCircle2 className="w-10 h-10 text-slate-300" />
-            <span className="text-base">暂无{isDone ? '已完成' : '未完成'}持续项</span>
+            <span className="text-base">暂无{isDone ? '待稽核' : '可汇报'}持续项</span>
           </div>
         ) : (
-          <table className="w-full border-collapse">
-            <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_0_#e2e8f0]">
-              <tr className="text-lg uppercase tracking-wider text-slate-500 border-b-2 border-slate-200 bg-white">
-                <th className="text-center font-bold py-2.5 px-2 w-10">No.</th>
-                <th className="text-center font-bold py-2.5 px-2 w-20">日期</th>
-                <th className="text-center font-bold py-2.5 px-2 w-20">提出人</th>
-                <th className="text-left font-bold py-2.5 px-2">提议内容</th>
-                <th className="text-center font-bold py-2.5 px-2 w-16">节点</th>
-                <th className="text-center font-bold py-2.5 px-2 w-24">部门</th>
-                <th className="text-center font-bold py-2.5 px-2 w-28 whitespace-nowrap">责任人</th>
-                <th className="text-center font-bold py-2.5 px-2 w-48">{isDone ? '稽核' : '完成情况'}</th>
+          <table className="w-full border-separate border-spacing-0">
+            <thead>
+              <tr className="text-lg uppercase tracking-wider text-slate-500">
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-10 bg-white border-b-2 border-slate-200">No.</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-20 bg-white border-b-2 border-slate-200">日期</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-20 bg-white border-b-2 border-slate-200">提出人</th>
+                <th className="sticky top-0 z-10 text-left font-bold py-2.5 px-2 bg-white border-b-2 border-slate-200">提议内容</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-16 bg-white border-b-2 border-slate-200">节点</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-24 bg-white border-b-2 border-slate-200">部门</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-28 whitespace-nowrap bg-white border-b-2 border-slate-200">责任人</th>
+                <th className="sticky top-0 z-10 text-center font-bold py-2.5 px-2 w-48 bg-white border-b-2 border-slate-200">{isDone ? '稽核' : '本期填报'}</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((it, i) => (
-                <tr key={it.id} className="border-b border-slate-100 hover:bg-slate-50/70 transition-colors group">
+                <tr key={it.id} className="[&>td]:border-b [&>td]:border-slate-100 hover:bg-slate-50/70 transition-colors group">
                   <td className="text-center py-2.5 px-2">
                     <div className="flex items-center justify-center gap-1.5">
                       <span className={`w-1.5 h-1.5 rounded-full ${dotColor} flex-shrink-0 group-hover:scale-125 transition-transform`} />
@@ -562,6 +607,22 @@ function ContinuousSlide({ items, mode, progressMap }: {
                         {(() => {
                           const pr = progressMap?.[it.id];
                           if (pr?.progress) {
+                            // 自动取数：格子只显示简短汇总，点击弹明细表格
+                            const hasDetail = Array.isArray(pr.detail) && pr.detail.length > 0;
+                            if (hasDetail && onShowDetail) {
+                              return (
+                                <div className="space-y-0.5">
+                                  <button
+                                    onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
+                                    className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
+                                    title="查看本周明细"
+                                  >
+                                    {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
+                                  </button>
+                                  <p className="text-[13px] text-slate-400">{pr.cycleDate} 填报</p>
+                                </div>
+                              );
+                            }
                             return (
                               <div className="space-y-0.5">
                                 <p className="text-base text-slate-700 leading-snug">{pr.progress}</p>
@@ -597,7 +658,268 @@ function ContinuousSlide({ items, mode, progressMap }: {
   );
 }
 
-// // 中文日期格式：2026-07-20 → 7月20日
+// ─────────────────────────────────────────────────────────────
+// ── 战略稽核（GSMALT）：X 项通报页 ──
+// ─────────────────────────────────────────────────────────────
+function GsmaltRow({ it, no }: { it: GsmaltItem; no: string }) {
+  return (
+    <tr className="[&>td]:border-b [&>td]:border-slate-100 hover:bg-slate-50/60 transition-colors">
+      <td className="text-center py-2.5 px-2"><span className="text-base font-semibold text-slate-300 tabular-nums">{no}</span></td>
+      <td className="text-left py-2.5 px-2 text-base font-medium text-slate-800 leading-snug max-w-[180px]"><p className="line-clamp-2">{it.kpi || '—'}</p></td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-500">{it.dept || '—'}</td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-700 whitespace-nowrap">{it.owner || '—'}</td>
+      <td className="py-2.5 px-2 text-base text-slate-600 leading-snug max-w-[260px]"><p className="line-clamp-2" title={it.yyfx || ''}>{it.yyfx || '—'}</p></td>
+      <td className="py-2.5 px-2 text-base text-slate-600 leading-snug max-w-[260px]"><p className="line-clamp-2" title={it.xdjh || ''}>{it.xdjh || '—'}</p></td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-600">{it.cl || '—'}</td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-600">{it.hl || '—'}</td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-600 whitespace-nowrap">{formatDateCN(it.jd)}</td>
+      <td className="text-center py-2.5 px-2 text-base whitespace-nowrap">
+        {it.newJd ? <span className="font-semibold text-blue-600">{formatDateCN(it.newJd)}</span> : <span className="text-slate-300">—</span>}
+      </td>
+    </tr>
+  );
+}
+
+function GsmaltXSlide({ items, all, monthLabel, loading, error }: {
+  items: GsmaltItem[]; all: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null;
+}) {
+  const blockedRows = items; // 打X项
+  const pendingRows = all.filter(i => i.audit === null); // 未处理项（未稽核）
+  const vCount = all.filter(i => i.audit === 0).length;
+  const xCount = all.filter(i => i.audit === 1).length;
+  const zCount = all.filter(i => i.audit === 2).length;
+  return (
+    <div className="relative w-full h-full bg-white rounded-xl shadow-2xl ring-1 ring-slate-200/60 overflow-hidden flex flex-col">
+      {/* 标题栏：深红渐变 + 警示竖条 */}
+      <div className="relative bg-gradient-to-r from-[#3d1f1f] to-[#5e2f2f] px-7 py-4 flex items-center gap-4 flex-shrink-0">
+        <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-red-500" />
+        <div className="w-10 h-10 rounded-xl bg-red-500/15 ring-1 ring-red-400/30 flex items-center justify-center flex-shrink-0">
+          <AlertTriangle className="w-5 h-5 text-red-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-[32px] font-black text-white tracking-tight leading-tight">绩效面谈 · 未达成 KPI 通报</h2>
+          <p className="text-base text-red-200/70 mt-1 tracking-widest">PERFORMANCE REVIEW · {monthLabel} 绩效面谈材料（未完成 + 未处理）</p>
+        </div>
+        <div className="text-right flex-shrink-0 flex items-center gap-5">
+          <div>
+            <div className="text-base text-red-200/60 tracking-wide">打X</div>
+            <div className="text-3xl font-black text-white tabular-nums leading-tight">{blockedRows.length}<span className="text-base font-normal text-white/60 ml-1">项</span></div>
+          </div>
+          <div>
+            <div className="text-base text-amber-200/60 tracking-wide">未处理</div>
+            <div className="text-3xl font-black text-white tabular-nums leading-tight">{pendingRows.length}<span className="text-base font-normal text-white/60 ml-1">项</span></div>
+          </div>
+        </div>
+      </div>
+
+      {/* 表格区 */}
+      <div className="flex-1 min-h-0 px-7 pb-2 overflow-y-auto custom-scrollbar">
+        {loading ? (
+          <div className="h-full flex items-center justify-center text-slate-300 text-base">绩效面谈数据加载中…</div>
+        ) : error ? (
+          <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
+            <AlertTriangle className="w-10 h-10 text-amber-300" />
+            <span className="text-base">{error}</span>
+          </div>
+        ) : blockedRows.length + pendingRows.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
+            <CheckCircle2 className="w-10 h-10 text-emerald-400" />
+            <span className="text-base">{monthLabel} 绩效面谈无未达成项，全部达成 🎉</span>
+          </div>
+        ) : (
+          <table className="w-full border-separate border-spacing-0">
+            <thead>
+              <tr className="text-base text-slate-500">
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-10 bg-slate-50 border-b border-slate-200">No.</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">KPI</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">责任部门</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">责任人</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">原因分析</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">行动计划</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">策略</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-16 bg-slate-50 border-b border-slate-200">衡量</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">原节点</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">新节点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <SectionRow title="✕ 打X项" count={blockedRows.length} tone="red" />
+              {blockedRows.length === 0 ? (
+                <tr><td colSpan={10} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+              ) : blockedRows.map((it, i) => (
+                <GsmaltRow key={`x-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
+              ))}
+              <SectionRow title="未处理项（未稽核）" count={pendingRows.length} tone="amber" />
+              {pendingRows.length === 0 ? (
+                <tr><td colSpan={10} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+              ) : pendingRows.map((it, i) => (
+                <GsmaltRow key={`p-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* 底部统计栏 */}
+      <div className="flex-shrink-0 border-t border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100/60 px-7 py-3">
+        <div className="flex items-center gap-5">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <span className="text-base font-bold text-slate-500 tracking-wide">{monthLabel} 绩效面谈 KPI</span>
+          </div>
+          <div className="w-px h-7 bg-slate-300/70 flex-shrink-0" />
+          <Metric label="总项数" value={`${all.length}`} unit="项" tone="slate" />
+          <Metric label="V 达标" value={`${vCount}`} unit="项" tone="emerald" />
+          <Metric label="X 未完成" value={`${xCount}`} unit="项" tone="red" />
+          <Metric label="0 待定" value={`${zCount}`} unit="项" tone="blue" />
+          <Metric label="未稽核" value={`${pendingRows.length}`} unit="项" tone="slate" />
+          <div className="flex-1" />
+          {all.length > 0 && (
+            <span className="text-base text-slate-400">新节点 = 同项（同KPI+责任人+原因分析）全表最新节点</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// ── 战略稽核（GSMALT）：汇总页 ──
+// ─────────────────────────────────────────────────────────────
+function GsmaltStatsSlide({ items, monthLabel, loading, error }: {
+  items: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null;
+}) {
+  const stats = useMemo(() => {
+    const v = items.filter(i => i.audit === 0);
+    const x = items.filter(i => i.audit === 1);
+    const z = items.filter(i => i.audit === 2);
+    const none = items.filter(i => i.audit === null); // 未稽核（未处理）
+    const byDept: Record<string, { v: number; x: number; z: number; n: number }> = {};
+    for (const i of items) {
+      const k = (i.dept || '未分配').trim() || '未分配';
+      byDept[k] = byDept[k] || { v: 0, x: 0, z: 0, n: 0 };
+      if (i.audit === 0) byDept[k].v++;
+      else if (i.audit === 1) byDept[k].x++;
+      else if (i.audit === 2) byDept[k].z++;
+      else byDept[k].n++;
+    }
+    const deptRows = Object.entries(byDept)
+      .map(([dept, n]) => ({ dept, ...n, total: n.v + n.x + n.z + n.n }))
+      .sort((a, b) => b.total - a.total);
+    const deptMax = deptRows.length ? deptRows[0].total : 1;
+    const rate = v.length + x.length > 0 ? (v.length / (v.length + x.length)) * 100 : null;
+    const withNewJd = x.filter(i => i.newJd).length;
+    return { v: v.length, x: x.length, z: z.length, none: none.length, total: items.length, deptRows, deptMax, rate, withNewJd };
+  }, [items]);
+
+  const cards = [
+    { label: '总项数', value: stats.total, cls: 'text-slate-800', bg: 'bg-slate-50', ring: 'ring-slate-100' },
+    { label: 'V 达标', value: stats.v, cls: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
+    { label: 'X 未完成', value: stats.x, cls: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
+    { label: '0 待定', value: stats.z, cls: 'text-blue-600', bg: 'bg-blue-50', ring: 'ring-blue-100' },
+  ];
+
+  return (
+    <SlideShell
+      eyebrow="绩效面谈"
+      title={`绩效面谈 KPI 汇总 · ${monthLabel}`}
+      subtitle={`数据源：OA 战略目标稽核表（GSMALT）· 共 ${stats.total} 项`}
+      accent="from-rose-500 to-orange-500"
+    >
+      {loading ? (
+        <div className="flex-1 flex items-center justify-center text-slate-300 text-base">绩效面谈数据加载中…</div>
+      ) : error ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-slate-300 gap-2">
+          <AlertTriangle className="w-10 h-10 text-amber-300" />
+          <span className="text-base">{error}</span>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-slate-300 gap-2">
+          <ClipboardList className="w-10 h-10" />
+          <span className="text-base">{monthLabel} 无绩效面谈数据</span>
+        </div>
+      ) : (
+        <div className="flex-1 grid grid-cols-12 gap-5 min-h-0">
+          {/* 四张统计卡 */}
+          <div className="col-span-12 grid grid-cols-4 gap-4">
+            {cards.map(c => (
+              <div key={c.label} className={cn('relative rounded-2xl p-5 ring-1 overflow-hidden', c.bg, c.ring)}>
+                <div className="text-base font-semibold text-slate-500">{c.label}</div>
+                <div className={cn('text-6xl font-black mt-1 tabular-nums', c.cls)}>{c.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 部门 V/X/0/未稽核 堆叠分布 */}
+          <div className="col-span-8 rounded-2xl border border-slate-100 p-5 bg-white flex flex-col min-h-0">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-slate-400" />
+                <h3 className="text-base font-bold text-slate-700">部门稽核分布（V / 0 / X / 未稽核）</h3>
+              </div>
+              <div className="flex items-center gap-3 text-base text-slate-500">
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" />V</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400" />0</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-500" />X</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-slate-300" />未稽核</span>
+              </div>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto pr-1">
+              {stats.deptRows.map(r => (
+                <div key={r.dept} className="flex items-center gap-3">
+                  <div className="w-28 text-base font-medium text-slate-600 truncate text-right" title={r.dept}>{r.dept}</div>
+                  <div className="flex-1 h-6 rounded-lg bg-slate-50 overflow-hidden relative flex">
+                    {r.total > 0 && (
+                      <>
+                        <div className="h-full bg-emerald-500/90" style={{ width: `${(r.v / stats.deptMax) * 100}%` }} />
+                        <div className="h-full bg-blue-400/90" style={{ width: `${(r.z / stats.deptMax) * 100}%` }} />
+                        <div className="h-full bg-red-500/90" style={{ width: `${(r.x / stats.deptMax) * 100}%` }} />
+                        <div className="h-full bg-slate-300/90" style={{ width: `${(r.n / stats.deptMax) * 100}%` }} />
+                      </>
+                    )}
+                  </div>
+                  <div className="w-44 text-base tabular-nums whitespace-nowrap">
+                    <span className="text-emerald-600 font-semibold">V{r.v}</span>
+                    <span className="text-slate-300 mx-0.5">/</span>
+                    <span className="text-blue-500 font-semibold">0{r.z}</span>
+                    <span className="text-slate-300 mx-0.5">/</span>
+                    <span className="text-red-600 font-semibold">X{r.x}</span>
+                    <span className="text-slate-300 mx-0.5">/</span>
+                    <span className="text-slate-500 font-semibold">未{r.n}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 稽核达成率 + X 项新节点落实 */}
+          <div className="col-span-4 rounded-2xl border border-slate-100 p-5 bg-white flex flex-col">
+            <div className="flex items-center gap-2 mb-4">
+              <Flag className="w-4 h-4 text-slate-400" />
+              <h3 className="text-base font-bold text-slate-700">稽核达成情况</h3>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-center gap-4">
+              <div className="relative w-36 h-36 rounded-full ring-1 ring-blue-100 flex items-center justify-center bg-blue-50/40">
+                <div className="text-center">
+                  <div className="text-5xl font-black tabular-nums text-blue-600">
+                    {stats.rate === null ? '—' : stats.rate.toFixed(1)}
+                  </div>
+                  <div className="text-base text-slate-400">达成率 %</div>
+                </div>
+                <span className="absolute -top-1 right-3 w-3 h-3 rounded-full ring-2 ring-white bg-emerald-500" />
+              </div>
+              <div className="text-base text-slate-500 text-center leading-relaxed">
+                达成率 = V ÷（V + X），0 项待定与未稽核不计入<br />
+                <span className="text-slate-400">未稽核 {stats.none} 项 · 打X项已排新节点：{stats.withNewJd} / {stats.x}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </SlideShell>
+  );
+}
+
+// 中文日期格式：2026-07-20 → 7月20日
 function formatDateCN(d: string | null | undefined) {
   if (!d) return '未定';
   const m = d.slice(5, 7).replace(/^0/, '');
@@ -663,14 +985,20 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 // ─────────────────────────────────────────────────────────────
 export default function MonthlyBoardPage() {
   const [items, setItems] = useState<BoardItem[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, { progress: string | null; cycleDate: string; syncedAt: string }>>({});
+  const [progressMap, setProgressMap] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>>({});
+  const [gsmalt, setGsmalt] = useState<GsmaltItem[]>([]);
+  const [gsmaltLoading, setGsmaltLoading] = useState(false);
+  const [gsmaltError, setGsmaltError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [immersive, setImmersive] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [api, setApi] = useState<CarouselApi>();
   const [current, setCurrent] = useState(0);
   const [count, setCount] = useState(0);
+  const [monthOffset, setMonthOffset] = useState(0); // 0=默认数据月(上月)，1=再往前一月，-1=未来月
   const deckRef = useRef<HTMLDivElement>(null);
+  const [doneDetail, setDoneDetail] = useState<BoardItem | null>(null); // 点开「已完成项」详情
+  const [contDetail, setContDetail] = useState<{ progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null } | null>(null); // 点开持续项自动取数明细
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -680,7 +1008,7 @@ export default function MonthlyBoardPage() {
       // 拉取持续项周期填报进展（actionId → 进展列表）
       const pr = await fetch('/api/continuous/progress').then(r => r.json());
       if (pr.success) {
-        const map: Record<string, { progress: string | null; cycleDate: string; syncedAt: string }> = {};
+        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }> = {};
         for (const [actionId, recs] of Object.entries(pr.data || {})) {
           const list = (recs as any[]);
           const latest = list.sort((a, b) => String(b.cycleDate).localeCompare(String(a.cycleDate)))[0];
@@ -689,6 +1017,7 @@ export default function MonthlyBoardPage() {
               progress: latest.progress || null,
               cycleDate: latest.cycleDate,
               syncedAt: latest.syncedAt,
+              detail: latest.detail ?? null,
             };
           }
         }
@@ -774,7 +1103,7 @@ export default function MonthlyBoardPage() {
     [items]
   );
 
-  // 持续项：未完成（仅公司月会）
+  // 持续项：需按期填报汇报的持续执行项（仅公司月会；无「已完成/未完成」口径，取消/关闭的不再汇报）
   const continuousPendingItems = useMemo(
     () => items.filter(i => {
       const mt = i.meeting_type || '';
@@ -786,10 +1115,10 @@ export default function MonthlyBoardPage() {
     [items]
   );
 
-  // 上月节点到期（截止日落在上个月）的未完成项；按节点日期统计
+  // 数据月节点到期（截止日落 在数据月）的未完成项；按节点日期统计（monthOffset 可翻历史/未来月）
   const lastMonthItems = useMemo(() => {
     const ref = new Date();
-    ref.setMonth(ref.getMonth() - 1);
+    ref.setMonth(ref.getMonth() - 1 - monthOffset);
     const { start, end } = monthRange(ref);
     return items.filter(i => {
       if (i.meeting_type !== '公司月会') return false;
@@ -800,15 +1129,58 @@ export default function MonthlyBoardPage() {
       if (isDone(i)) return false; // 打 V/0 或状态 done = 已完成
       const dd = new Date(i.due_date.slice(0, 10));
       return dd >= start && dd <= end;
+    }).sort((a, b) => {
+      const o = (a.owner || '').localeCompare(b.owner || '', 'zh');
+      if (o !== 0) return o;
+      return (a.description || '').localeCompare(b.description || '', 'zh');
     });
-  }, [items]);
+  }, [items, monthOffset]);
 
-  // 上个月（数据月）的年月，用于标题「N月」
+  // 数据月内到期的已完成项（第一页「✓ 已完成项」板块展示，与未完成通报同期口径）
+  const lastMonthDoneItems = useMemo(() => {
+    const ref = new Date();
+    ref.setMonth(ref.getMonth() - 1 - monthOffset);
+    const { start, end } = monthRange(ref);
+    return items.filter(i => {
+      if (i.meeting_type !== '公司月会') return false;
+      if (i.due_date_type === 'continuous' || i.due_date_type === 'tbd' || !i.due_date) return false;
+      if (getActionDisplayStatus(i.status) === 'cancelled') return false;
+      if (!isDone(i)) return false; // 打 V 或状态 done = 已完成
+      const dd = new Date(i.due_date.slice(0, 10));
+      return dd >= start && dd <= end;
+    }).sort((a, b) => {
+      const o = (a.owner || '').localeCompare(b.owner || '', 'zh');
+      if (o !== 0) return o;
+      return (a.description || '').localeCompare(b.description || '', 'zh');
+    });
+  }, [items, monthOffset]);
+
+  // 数据月的年月，用于标题「N月」
   const lastMonthLabel = useMemo(() => {
     const ref = new Date();
-    ref.setMonth(ref.getMonth() - 1);
+    ref.setMonth(ref.getMonth() - 1 - monthOffset);
     return `${ref.getFullYear()}-${String(ref.getMonth() + 1).padStart(2, '0')}`;
-  }, []);
+  }, [monthOffset]);
+
+  // 战略稽核（GSMALT）：随数据月加载（翻月自动刷新）
+  useEffect(() => {
+    let cancelled = false;
+    setGsmaltLoading(true);
+    setGsmaltError(null);
+    fetch(`/api/gsmalt?month=${lastMonthLabel}`)
+      .then(r => r.json())
+      .then(j => {
+        if (cancelled) return;
+        if (j.success) setGsmalt(j.items || []);
+        else setGsmaltError(j.error || '战略稽核数据加载失败');
+      })
+      .catch(() => { if (!cancelled) setGsmaltError('战略稽核数据加载失败'); })
+      .finally(() => { if (!cancelled) setGsmaltLoading(false); });
+    return () => { cancelled = true; };
+  }, [lastMonthLabel]);
+
+  // 战略稽核打X项
+  const gsmaltXItems = useMemo(() => gsmalt.filter(i => i.audit === 1), [gsmalt]);
 
   // 底部统计：汇报月N → 数据月 N-1 → 对比月 N-2
   // 数据月无完整数据时回退模拟数据（待数据连续后自动替换）
@@ -833,11 +1205,12 @@ export default function MonthlyBoardPage() {
       return { total, valid, done, rate, hasData: total > 0 };
     };
 
-    const dataM = calcMonth(-1);   // 上月（数据月）
-    const compareM = calcMonth(-2); // 上上月（对比月）
+    const baseOffset = -1 - monthOffset; // 数据月相对当前月的偏移
+    const dataM = calcMonth(baseOffset);       // 数据月
+    const compareM = calcMonth(baseOffset - 1); // 对比月（数据月前一月）
 
     const dataRef = new Date();
-    dataRef.setMonth(dataRef.getMonth() - 1);
+    dataRef.setMonth(dataRef.getMonth() + baseOffset);
     const dataYear = dataRef.getFullYear();
     const dataMonth = dataRef.getMonth() + 1;
 
@@ -848,14 +1221,16 @@ export default function MonthlyBoardPage() {
     const rate = dataM.rate ?? 0;
     const diff = compareM.rate !== null ? rate - compareM.rate : 0;
     return { year: dataYear, monthNum: dataMonth, target: dataM.valid, done: dataM.done, rate, diff, mock: false };
-  }, [items]);
+  }, [items, monthOffset]);
 
   // 幻灯片清单 —— 后续异构页在此追加
   const slides = useMemo(() => [
-    { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastMonthItems} allItems={items} monthLabel={lastMonthLabel} stats={monthStats} /> },
-    { id: 'continuous-pending', label: '持续项·未完成', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressMap} /> },
+    { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastMonthItems} doneItems={lastMonthDoneItems} allItems={items} monthLabel={lastMonthLabel} stats={monthStats} onDoneClick={setDoneDetail} /> },
+    { id: 'gsmalt-x', label: '绩效面谈·未达成KPI', node: <GsmaltXSlide items={gsmaltXItems} all={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} /> },
+    { id: 'continuous-pending', label: '持续项汇报', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressMap} onShowDetail={setContDetail} /> },
+    { id: 'gsmalt-stats', label: '绩效面谈·KPI汇总', node: <GsmaltStatsSlide items={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} /> },
     { id: 'stats', label: '总览', node: <StatsSlide items={monthlyItems} contItems={monthlyContItems} progressMap={progressMap} /> },
-  ], [monthlyItems, monthlyContItems, lastMonthItems, lastMonthLabel, monthStats, continuousPendingItems, progressMap]);
+  ], [items, monthlyItems, monthlyContItems, lastMonthItems, lastMonthDoneItems, lastMonthLabel, monthStats, continuousPendingItems, progressMap, gsmalt, gsmaltXItems, gsmaltLoading, gsmaltError]);
 
   const goPrev = () => api?.scrollPrev();
   const goNext = () => api?.scrollNext();
@@ -888,6 +1263,14 @@ export default function MonthlyBoardPage() {
             {loading && <span className="text-base opacity-60">加载中…</span>}
           </div>
           <div className="flex items-center gap-1.5">
+            <div className={cn(
+              'flex items-center gap-1 rounded-lg px-1.5 py-0.5 text-xs font-medium',
+              immersive ? 'bg-white/10 text-white' : 'bg-white border border-slate-200 text-slate-600'
+            )}>
+              <button onClick={() => setMonthOffset(o => o + 1)} title="上一月" className="px-1.5 hover:opacity-70 text-sm">‹</button>
+              <span className="px-1 tabular-nums">{lastMonthLabel}</span>
+              <button onClick={() => setMonthOffset(o => o - 1)} title="下一月" className="px-1.5 hover:opacity-70 text-sm">›</button>
+            </div>
             <ToolbarBtn onClick={load} title="刷新数据" immersive={immersive}>
               <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
             </ToolbarBtn>
@@ -902,6 +1285,7 @@ export default function MonthlyBoardPage() {
             <ToolbarBtn onClick={toggleImmersive} title="沉浸模式 (F)" immersive={immersive}>
               {immersive ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
             </ToolbarBtn>
+            <BoardBigTextToggle immersive={immersive} />
           </div>
         </div>
 
@@ -958,6 +1342,11 @@ export default function MonthlyBoardPage() {
           </div>
         </div>
       </div>
+
+      {/* 已完成项详情弹窗（浮于投屏/沉浸层之上） */}
+      <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
+      {/* 持续项自动取数明细弹窗 */}
+      <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
     </DashboardLayout>
   );
 }

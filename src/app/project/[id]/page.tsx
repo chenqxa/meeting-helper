@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { getActionDisplayLabel, getActionDisplayStatus } from '@/lib/action-status';
 import { getDisplayOaResult } from '@/lib/oa-result-display';
@@ -31,6 +31,7 @@ interface ActionItem {
   description: string;
   owner?: string | null;
   due_date?: string | null;
+  due_date_type?: string | null;
   priority: string;
   status: string;
   meeting_id: string;
@@ -257,6 +258,7 @@ export default function ProjectPage() {
   const [creatingArtifact, setCreatingArtifact] = useState(false);
   const [resultItem, setResultItem] = useState<ActionItem | null>(null);
   const [resultForm, setResultForm] = useState({ text: '', status: 'done' });
+  const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [pushPreviewOpen, setPushPreviewOpen] = useState(false);
@@ -439,10 +441,26 @@ export default function ProjectPage() {
     setResultForm({
       // 预填过滤导入元数据（{"y":..,"w":..,"d":..}），避免混入新一轮汇报
       text: getDisplayOaResult(action.oa_result),
-      status: action.status === 'done' ? 'done' : action.status === 'blocked' ? 'blocked' : 'in_progress',
+      // 与待办中心口径一致：两选一，未完成视角待选
+      status: action.status === 'done' ? 'done' : 'blocked',
     });
+    setNextDueDate('');
     setResultImages([]);
   };
+
+  // 汇报弹窗打开时：document 级粘贴监听，任意位置 Ctrl+V 微信/QQ 截图都能进附件
+  useEffect(() => {
+    if (!resultItem) return;
+    const handlePaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.items || []).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter((f): f is File => f !== null);
+      if (files.length > 0) {
+        e.preventDefault();
+        setResultImages(prev => [...prev, ...files.filter(f => f.type.startsWith('image/'))]);
+      }
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [resultItem]);
 
   const handleOpenPushPreview = async () => {
     setPushPreviewOpen(true);
@@ -1840,11 +1858,10 @@ export default function ProjectPage() {
             <div className="flex-1 overflow-y-auto px-6 space-y-5 pb-2">
               <div>
                 <div className="text-xs font-medium text-slate-500 mb-2.5">处理结果</div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   {[
                     { value: 'done', label: '已完成', emoji: '✅', activeBg: 'bg-emerald-500', border: 'border-emerald-300', bg: 'bg-emerald-50', text: 'text-emerald-700' },
-                    { value: 'in_progress', label: '进行中', emoji: '🔄', activeBg: 'bg-blue-500', border: 'border-blue-300', bg: 'bg-blue-50', text: 'text-blue-700' },
-                    { value: 'blocked', label: '阻塞', emoji: '🚫', activeBg: 'bg-red-500', border: 'border-red-300', bg: 'bg-red-50', text: 'text-red-700' },
+                    { value: 'blocked', label: '未完成', emoji: '🚫', activeBg: 'bg-red-500', border: 'border-red-300', bg: 'bg-red-50', text: 'text-red-700' },
                   ].map(opt => (
                     <button
                       key={opt.value}
@@ -1862,9 +1879,22 @@ export default function ProjectPage() {
                 </div>
               </div>
 
+              {resultForm.status === 'blocked' && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-2.5">下次完成时间 <span className="text-red-400">*</span></div>
+                  <input
+                    type="date"
+                    value={nextDueDate}
+                    onChange={e => setNextDueDate(e.target.value)}
+                    className="w-full h-9 text-sm border border-slate-200 rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-red-200 focus:border-red-300"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">选择后系统将自动生成一条带新截止时间的新任务</p>
+                </div>
+              )}
+
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <div className="text-xs font-medium text-slate-500">处理说明</div>
+                  <div className="text-xs font-medium text-slate-500">{resultForm.status === 'blocked' ? '未完成理由' : '处理说明'} <span className="text-red-400">*</span></div>
                   <div className="text-[10px] text-slate-300">{resultForm.text.length}/500</div>
                 </div>
                 <textarea
@@ -1873,13 +1903,15 @@ export default function ProjectPage() {
                   value={resultForm.text}
                   onChange={e => setResultForm(f => ({ ...f, text: e.target.value.slice(0, 500) }))}
                   className="w-full text-sm border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300 resize-none placeholder:text-slate-300 transition-all"
-                  placeholder={resultForm.status === 'done' ? '描述完成情况、成果...' : resultForm.status === 'blocked' ? '说明阻塞原因、需要的支持...' : '描述当前进展、下一步计划...'}
+                  placeholder={resultForm.status === 'done' ? '描述完成情况、成果...' : '说明未完成原因、需要的支持...'}
                 />
               </div>
 
               <div>
                 <div className="text-xs font-medium text-slate-500 mb-2">
-                  图片附件 <span className="text-slate-300 font-normal">（截图、证明材料等）</span>
+                  图片附件 {resultItem.due_date_type === 'continuous'
+                    ? <span className="text-slate-300 font-normal">（可选，有进展证据时上传）</span>
+                    : <><span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（截图、证明材料等，至少上传 1 张）</span></>}
                 </div>
                 <div
                   className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-pointer group"
@@ -1900,7 +1932,7 @@ export default function ProjectPage() {
                     onChange={e => setResultImages(prev => [...prev, ...Array.from(e.target.files || [])])}
                   />
                   <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 或 拖拽图片至此</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
                   <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
                 </div>
                 {resultImages.length > 0 && (
@@ -1937,6 +1969,22 @@ export default function ProjectPage() {
               </button>
               <button
                 onClick={async () => {
+                  // 未完成必须填下次完成时间
+                  if (resultForm.status === 'blocked' && !nextDueDate) {
+                    alert('请选择下次完成时间');
+                    return;
+                  }
+                  // 说明必填
+                  if (!resultForm.text.trim()) {
+                    alert(resultForm.status === 'blocked' ? '请填写未完成理由' : '请填写处理说明');
+                    return;
+                  }
+                  // 附件必填（至少 1 张）
+                  // 图片附件必填（至少 1 张）——持续项周期汇报可选（"无进展"为合法状态，无图可传）
+                  if (resultItem.due_date_type !== 'continuous' && resultImages.length === 0) {
+                    alert('请至少上传 1 张图片附件（截图、证明材料等）');
+                    return;
+                  }
                   setResultSubmitting(true);
                   try {
                     const imageUrls: string[] = [];
@@ -1955,9 +2003,11 @@ export default function ProjectPage() {
                         _meetingId: resultItem.meeting_id,
                         oa_result: resultForm.text,
                         oa_result_at: new Date().toISOString(),
-                        oa_score: resultForm.status === 'done' ? 1 : resultForm.status === 'blocked' ? -1 : undefined,
+                        // 已完成=V(+1)；未完成=X(-1)+下次日期自动重派新任务
+                        oa_score: resultForm.status === 'done' ? 1 : -1,
                         oa_auto_detected: false,
                         status: resultForm.status,
+                        next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined,
                         block_reason: resultForm.status === 'blocked' ? resultForm.text : null,
                         oa_attachments: imageUrls.length > 0 ? imageUrls : (resultItem.oa_attachments || []),
                       }),
@@ -1975,9 +2025,7 @@ export default function ProjectPage() {
                 className={`flex-1 h-10 rounded-xl text-sm font-semibold text-white transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
                   resultForm.status === 'done'
                     ? 'bg-emerald-500 hover:bg-emerald-600'
-                    : resultForm.status === 'blocked'
-                      ? 'bg-red-500 hover:bg-red-600'
-                      : 'bg-blue-600 hover:bg-blue-700'
+                    : 'bg-red-500 hover:bg-red-600'
                 }`}
               >
                 {resultSubmitting ? (
@@ -1985,11 +2033,7 @@ export default function ProjectPage() {
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 提交中...
                   </span>
                 ) : (
-                  resultForm.status === 'done'
-                    ? '✅ 标记完成'
-                    : resultForm.status === 'blocked'
-                      ? '🚫 报告阻塞'
-                      : '🔄 更新进展'
+                  resultForm.status === 'done' ? '✅ 标记完成' : '🚫 标记未完成'
                 )}
               </button>
             </div>

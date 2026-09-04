@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 import { createDepartment, createEmployee, getDepartments } from '@/storage/database/org-storage';
 
 // POST /api/org/init - 初始化模拟组织架构数据
 export async function POST() {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     // 检查是否已有数据
     const existing = await getDepartments();
     if (existing.length > 0) {

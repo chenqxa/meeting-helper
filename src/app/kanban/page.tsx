@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import DashboardLayout from '@/components/layout/dashboard-layout';
 import {
-  AlertTriangle, User, Calendar, Clock, CheckCircle2,
+  AlertTriangle, User, Users, Calendar, Clock, CheckCircle2,
   Plus, GripVertical, ArrowRight, Search, Target, RefreshCw,
   FileText, Eye, Pencil, Ban, Paperclip, X, Save, ShieldAlert, LayoutGrid, ChevronDown, Sparkles, Trash2
 } from 'lucide-react';
@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { ScreenshotCapture } from '@/components/ui/screenshot-capture';
 import { getDisplayOaResult } from '@/lib/oa-result-display';
+import { isGroupOwner } from '@/lib/group-owners';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 interface KanbanCard {
@@ -32,6 +33,7 @@ interface KanbanCard {
   meeting_id?: string;
   meeting_type?: string;
   meeting_date?: string;
+  meeting_created_at?: string | null;
   dept?: string | null;
   confirmed_by?: string;
   confirmed_at?: string | null;
@@ -45,7 +47,7 @@ interface KanbanCard {
 }
 
 type ColumnKey = 'overdue' | 'unprocessed' | 'done' | 'verified';
-type ViewMode = 'all' | 'my';
+type ViewMode = 'all' | 'my' | 'group';
 type ViewType = 'board' | 'calendar';
 type QuickDateFilter = 'all' | 'overdue' | 'today' | 'this_week' | 'high_priority';
 type DatePreset = 'all' | 'this_month' | 'this_week' | 'today' | 'custom';
@@ -495,6 +497,7 @@ export default function KanbanPage() {
   const [resultForm, setResultForm] = useState({ text: '', status: 'in_progress' });
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
+  const [resultNone, setResultNone] = useState(false); // 持续项「本期无进展/无完成情况」：true=无（免填说明与附件）
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [showIndicators, setShowIndicators] = useState(false);
   const [showAiInsight, setShowAiInsight] = useState(false);
@@ -546,21 +549,42 @@ export default function KanbanPage() {
   }, []);
 
   // ── 持续项本周期判定 ──
-  // 各会议类型的最近一次会议日期（从全量卡片聚合），用于判定"本周期会议是否已开完"
+  // 各会议类型的最近一次已开会议（从全量卡片聚合，meeting_date <= 今天），用于周期锚点
+  // 注意必须排除未来日期的会议（测试/预录数据）：锚点被推到未来会导致"本周期已填报"永远判定失败
   const latestMeetingByType = useMemo(() => {
-    const map: Record<string, string> = {};
+    const now = new Date(); now.setHours(0, 0, 0, 0);
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const map: Record<string, { date: string; createdAt?: string | null }> = {};
     for (const c of cards) {
       const mt = c.meeting_type || '';
-      const md = c.meeting_date || '';
+      const md = (c.meeting_date || '').slice(0, 10);
       if (!mt || !md) continue;
-      if (!map[mt] || md > map[mt]) map[mt] = md;
+      if (md > todayStr) continue; // 未来会议不作为周期锚点
+      if (!map[mt] || md > map[mt].date) map[mt] = { date: md, createdAt: c.meeting_created_at || null };
     }
     return map;
   }, [cards]);
 
+  // 周期分界线（业务口径）：开完会传完纪要（≈会议记录创建时刻）之后 = 新一周。
+  // 精确到"日"：ISO 时间转北京日期；无创建时间的历史数据回退为"会议次日"（原口径）
+  const cycleBoundaryOf = useCallback((mt: string): Date | null => {
+    const latest = latestMeetingByType[mt];
+    if (!latest) return null;
+    if (latest.createdAt) {
+      const iso = new Date(latest.createdAt);
+      if (!isNaN(iso.getTime())) {
+        const bj = new Date(iso.getTime() + 8 * 3600 * 1000);
+        return new Date(bj.toISOString().slice(0, 10) + 'T00:00:00');
+      }
+    }
+    const d = new Date(latest.date + 'T00:00:00');
+    d.setDate(d.getDate() + 1);
+    return d;
+  }, [latestMeetingByType]);
+
   // 本周期内已填报 → 待办视作"本周期完成"
   // 月会/产销会（按月、看最近已开会所在月数据）：用 dataMonth == 最近已开会所在月
-  // 周例会：填报日 >= 最近会议日次日（周二起算新一周）
+  // 周例会：填报日 >= 周期分界线（会议记录创建日 ≈ 纪要上传日）→ 本周已填
   const reportedThisCycle = useCallback((card: KanbanCard): boolean => {
     if ((card.due_date_type || '') !== 'continuous') return false;
     const pr = progressMap[card.id];
@@ -569,35 +593,32 @@ export default function KanbanPage() {
     if (mt === '公司月会' || mt === '产销会') {
       const latest = latestMeetingByType[mt];
       if (latest) {
-        return pr.dataMonth === latest.slice(0, 7);
+        return pr.dataMonth === latest.date.slice(0, 7);
       }
       return new Date(pr.cycleDate + 'T00:00:00') >= new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     }
-    // 周例会：最近会议日次日（周二）起算新周期；填报日 >= 该起点 → 本周已填
-    const latest = latestMeetingByType[mt];
-    if (latest) {
-      const nextDay = new Date(latest.slice(0, 10) + 'T00:00:00');
-      nextDay.setDate(nextDay.getDate() + 1);
-      nextDay.setHours(0, 0, 0, 0);
-      return new Date(pr.cycleDate + 'T00:00:00') >= nextDay;
+    // 周例会：填报日 >= 周期分界线（会议记录创建日 ≈ 纪要上传日）→ 本周已填
+    const boundary = cycleBoundaryOf(mt);
+    if (boundary) {
+      return new Date(pr.cycleDate + 'T00:00:00') >= boundary;
     }
-    const diff = (new Date().getDay() + 7 - 5) % 7;
-    const d = new Date(); d.setDate(d.getDate() - diff); d.setHours(0, 0, 0, 0);
+    // 查不到会议记录：回退按本周一起算
+    const dow = (new Date().getDay() + 6) % 7;
+    const d = new Date(); d.setDate(d.getDate() - dow); d.setHours(0, 0, 0, 0);
     return new Date(pr.cycleDate + 'T00:00:00') >= d;
-  }, [progressMap, latestMeetingByType]);
+  }, [progressMap, latestMeetingByType, cycleBoundaryOf]);
 
   // ── 持续项填报周期判定 ──
-  // 会议产生（当天）= 上一周期翻篇；会议次日 = 新周期开始 → 显示"本期待填报"
-  // 今天 > 最近会议日期 → 在填报周期（显示）；今天 <= 会议日期（当天）→ 翻篇（消失）
+  // 分界线（会议记录创建 ≈ 开完会传完纪要）之后 = 新周期开启 → 显示"本期待填报"
+  // 分界线之前（会还没开/纪要未传）→ 上一周期尚未汇报，仍按"不在填报周期"处理
   const inReportingCycle = useCallback((card: KanbanCard): boolean => {
     if ((card.due_date_type || '') !== 'continuous') return false;
     const mt = card.meeting_type || '';
-    const latest = latestMeetingByType[mt];
-    if (!latest) return false; // 查不到会议日期 → 不显示（保持现状）
-    const meetingDate = new Date(latest.slice(0, 10) + 'T00:00:00');
+    const boundary = cycleBoundaryOf(mt);
+    if (!boundary) return false; // 查不到会议日期 → 不显示（保持现状）
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    return today > meetingDate;
-  }, [latestMeetingByType]);
+    return today >= boundary;
+  }, [cycleBoundaryOf]);
 
   // 持续项卡片在待办的最终判定：在填报周期 && 本周期未填 → 显示；否则消失
   const shouldShowContinuous = useCallback((card: KanbanCard): boolean => {
@@ -650,6 +671,33 @@ export default function KanbanPage() {
     }).catch(() => {}).finally(() => setUserLoaded(true));
   }, []);
 
+  // 企微卡片入口：?meetingId=xx 聚焦到该会议的待办（useEffect 中读取，避免 hydration 不一致）
+  const [focusMeetingId, setFocusMeetingId] = useState<string | null>(null);
+  // 持续项定时推送卡片入口（?type=continuous）：绕过填报周期判定，推送在催的项必须可见
+  const [fromContinuousPush, setFromContinuousPush] = useState(false);
+  // 推送批次精确过滤：?pushId=xx → 只显示该批次推送的持续项（不同类型/批次不混）
+  const [pushItemIds, setPushItemIds] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    const mid = searchParams.get('meetingId');
+    if (mid) setFocusMeetingId(mid);
+    // 持续项定时推送卡片：?type=continuous 预选持续项筛选
+    const t = searchParams.get('type');
+    if (t === 'continuous' || t === 'normal') setTypeFilter(t);
+    if (t === 'continuous') setFromContinuousPush(true);
+    // 批次精确过滤：拉取本批推送的 itemIds
+    const pid = searchParams.get('pushId');
+    if (pid) {
+      fetch(`/api/push-batch?pushId=${encodeURIComponent(pid)}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.success && Array.isArray(d.data?.itemIds) && d.data.itemIds.length > 0) {
+            setPushItemIds(new Set(d.data.itemIds));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [searchParams]);
+
   useEffect(() => { loadActions(); loadOrgEmployees(); }, [loadActions, loadOrgEmployees]);
 
   const openResult = (card: KanbanCard) => {
@@ -658,6 +706,8 @@ export default function KanbanPage() {
     setResultForm({ text: getDisplayOaResult((card as any).oa_result), status: card.due_date_type === 'continuous' ? 'in_progress' : card.status === 'done' ? 'done' : 'blocked' });
     setNextDueDate('');
     setResultImages([]);
+    // 上期填「无」的记录（oa_result 规范为"无"）重开时默认仍选「无」，无需再手点
+    setResultNone(card.due_date_type === 'continuous' && getDisplayOaResult((card as any).oa_result) === '无');
   };
 
   // 汇报弹窗打开时：document 级粘贴监听，任意位置 Ctrl+V 截图都能捕获
@@ -687,8 +737,7 @@ export default function KanbanPage() {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
     return d;
-  }, []);
-  const weekEnd = useMemo(() => {
+  }, []);  const weekEnd = useMemo(() => {
     const d = new Date(today);
     d.setDate(today.getDate() + 6);
     d.setHours(23, 59, 59, 999);
@@ -697,7 +746,14 @@ export default function KanbanPage() {
 
   const filteredCards = cards.filter(c => {
     if (searchText && !c.description.toLowerCase().includes(searchText.toLowerCase()) && !c.owner?.toLowerCase().includes(searchText.toLowerCase())) return false;
-    if (!shouldShowContinuous(c)) return false; // 持续项：不在填报周期或本周期已填 → 不进待办（历史保留在填报统计）
+    // 推送批次精确过滤：只显示该次推送的持续项
+    if (pushItemIds && !pushItemIds.has(c.id)) return false;
+    // 企微卡片聚焦模式：只显示该会议的待办（任何视图）
+    if (focusMeetingId && c.meeting_id !== focusMeetingId) return false;
+    // 持续项：不在填报周期或本周期已填 → 不进待办（历史保留在填报统计）
+    // 例外：群体项视图（代填）、持续项推送卡片入口、以及"我的任务"视图（自己名下都该可见，
+    // 与侧边栏待办角标口径一致，避免"角标有数点进去没有"）
+    if (viewMode === 'all' && !fromContinuousPush && !shouldShowContinuous(c)) return false;
     if (typeFilter === 'continuous' && (c.due_date_type || '') !== 'continuous') return false;
     if (typeFilter === 'normal' && (c.due_date_type || '') === 'continuous') return false;
     if (filterOwner && c.owner !== filterOwner) return false;
@@ -709,21 +765,31 @@ export default function KanbanPage() {
       const matchLoginId = currentUser?.loginid && c.ownerLoginId === currentUser.loginid;
       if (!matchName && !matchLoginId) return false;
     }
+    // 群体项视图：责任人为"所有人/各部门/各部门负责人/品质部"等群体的持续项（管理员代填）
+    // 判定与「我的任务」群体开关统一用 isGroupOwner 同一份名单，避免两处口径不一致
+    if (viewMode === 'group') {
+      if (!isGroupOwner(c.owner)) return false;
+      if ((c.due_date_type || '') !== 'continuous') return false;
+    }
     const dueDateType = c.due_date_type || 'date';
     const dueDate = c.due_date ? new Date(c.due_date.slice(0, 10)) : null;
-    // 持续项和待定项不参与日期筛选
-    if (dueDateType !== 'continuous' && dueDateType !== 'tbd') {
-      if (dateStart && (!dueDate || dueDate < new Date(dateStart))) return false;
-      if (dateEnd) {
-        const end = new Date(dateEnd);
-        end.setHours(23, 59, 59, 999);
-        if (!dueDate || dueDate > end) return false;
+    // 日期范围筛选（默认近30天）仅"全部任务"视图与企微聚焦模式外生效：
+    // "我的任务"视图跳过——我的待办含未来截止的都必须可见（与侧边栏角标口径一致）
+    if (!focusMeetingId && viewMode !== 'my') {
+      // 持续项和待定项不参与日期筛选
+      if (dueDateType !== 'continuous' && dueDateType !== 'tbd') {
+        if (dateStart && (!dueDate || dueDate < new Date(dateStart))) return false;
+        if (dateEnd) {
+          const end = new Date(dateEnd);
+          end.setHours(23, 59, 59, 999);
+          if (!dueDate || dueDate > end) return false;
+        }
       }
+      if (quickDateFilter === 'overdue' && (!dueDate || c.status === 'done' || c.status === 'blocked' || dueDate >= today)) return false;
+      if (quickDateFilter === 'today' && (!dueDate || dueDate.getTime() !== today.getTime())) return false;
+      if (quickDateFilter === 'this_week' && (!dueDate || dueDate < today || dueDate > weekEnd)) return false;
+      if (quickDateFilter === 'high_priority' && c.priority !== 'high') return false;
     }
-    if (quickDateFilter === 'overdue' && (!dueDate || c.status === 'done' || c.status === 'blocked' || dueDate >= today)) return false;
-    if (quickDateFilter === 'today' && (!dueDate || dueDate.getTime() !== today.getTime())) return false;
-    if (quickDateFilter === 'this_week' && (!dueDate || dueDate < today || dueDate > weekEnd)) return false;
-    if (quickDateFilter === 'high_priority' && c.priority !== 'high') return false;
     return true;
   });
 
@@ -873,9 +939,8 @@ export default function KanbanPage() {
     }
   }, []);
 
-  // ── 截图处理 ──
+  // ── 截图处理（完成对话框用）──
   const handleScreenshotCapture = useCallback((imageDataUrl: string) => {
-    // 将 dataURL 转换为 File 对象
     fetch(imageDataUrl)
       .then(res => res.blob())
       .then(blob => {
@@ -1278,6 +1343,20 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
           </div>
 
           <div className="bg-white px-4 py-3">
+            {/* 企微卡片聚焦模式提示条 */}
+            {(focusMeetingId || pushItemIds) && (
+              <div className="mb-2 px-4 py-2 bg-blue-50 border border-blue-100 rounded-xl flex items-center justify-between gap-3">
+                <span className="text-xs text-blue-700 truncate">
+                  {pushItemIds
+                    ? `🔄 本期推送的持续项（${filteredCards.length}条）`
+                    : `📋 正在查看该会议的行动项（${filteredCards.length}条）`}
+                </span>
+                <button
+                  onClick={() => { setFocusMeetingId(null); setPushItemIds(null); }}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-medium whitespace-nowrap"
+                >查看全部任务</button>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               {currentUser?.role !== 'employee' && (
                 <div className="flex rounded-2xl border border-slate-200 bg-white p-1 shadow-sm">
@@ -1293,6 +1372,15 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                     }`}>
                     <User className="w-3.5 h-3.5" /> 我的任务
                   </button>
+                  {(currentUser?.role === 'admin' || currentUser?.role === 'manager') && (
+                    <button onClick={() => setViewMode('group')}
+                      title="责任人为「所有人/各部门」等群体的持续项，由管理员代为填写进展"
+                      className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-all ${
+                        viewMode === 'group' ? 'bg-violet-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                      }`}>
+                      <Users className="w-3.5 h-3.5" /> 群体项
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1695,8 +1783,8 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
         </div>
       )}
 
-      {/* 看板列 */}
-      {viewType === 'board' && viewMode === 'all' && (
+      {/* 看板列（全部任务 + 群体项视图共用：群体项复用三列看板，过滤已在 filteredCards 完成） */}
+      {viewType === 'board' && (viewMode === 'all' || viewMode === 'group') && (
       <div className="grid gap-5 flex-1 min-h-[320px] grid-rows-1 grid-cols-3">
         {COLUMNS.map(col => {
           const colCards = getColumnCards(col.key);
@@ -1906,26 +1994,51 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                          )}
                        </div>
 
-                      {/* 来源会议 */}
-                      {card.meeting_title && (
-                        <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1">
-                          <button
-                            onClick={() => card.meeting_id && router.push(`/meeting/${card.meeting_id}`)}
-                            className="text-[10px] text-slate-400 hover:text-blue-500 truncate flex items-center gap-0.5 transition-colors"
-                          >
-                            <FileText className="w-2.5 h-2.5" />
-                            {card.meeting_title}
-                          </button>
-                          {card.confirmed_by && card.status !== 'done' && (
-                            <span className="ml-auto text-[10px] text-blue-500 flex items-center gap-0.5 flex-shrink-0">
-                              <User className="w-2.5 h-2.5" /> {card.confirmed_by} 确认
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                       {/* 来源会议 */}
+                       {card.meeting_title && (
+                         <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1">
+                           <button
+                             onClick={() => card.meeting_id && router.push(`/meeting/${card.meeting_id}`)}
+                             className="text-[10px] text-slate-400 hover:text-blue-500 truncate flex items-center gap-0.5 transition-colors"
+                           >
+                             <FileText className="w-2.5 h-2.5" />
+                             {card.meeting_title}
+                           </button>
+                           {card.confirmed_by && card.status !== 'done' && (
+                             <span className="ml-auto text-[10px] text-blue-500 flex items-center gap-0.5 flex-shrink-0">
+                               <User className="w-2.5 h-2.5" /> {card.confirmed_by} 确认
+                             </span>
+                           )}
+                         </div>
+                       )}
+
+                       {/* 群体项视图：复刻「我的任务」卡片——最近填报展示 + 代填汇报按钮（管理员代填场景） */}
+                       {viewMode === 'group' && card.due_date_type === 'continuous' && (() => {
+                         const pr = progressMap[card.id];
+                         return pr?.progress ? (
+                           <div className="mt-1.5 p-2 bg-blue-50/60 rounded-lg border border-blue-100 text-[11px] text-slate-600 line-clamp-2">
+                             <span className="text-slate-400">最近填报（{pr.cycleDate?.slice(5)}）：</span>{pr.progress}
+                           </div>
+                         ) : null;
+                       })()}
+                       {viewMode === 'group' && (
+                         <div className="mt-2 flex items-center justify-end">
+                           <button
+                             onClick={() => openResult(card)}
+                             className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-all ${
+                               colKey === 'done'
+                                 ? 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                                 : 'border-violet-200 bg-white text-violet-600 hover:bg-violet-50'
+                             }`}
+                           >
+                             <Pencil className="h-3 w-3" />
+                             {colKey === 'done' ? '查看 / 修改汇报' : '代填汇报'}
+                           </button>
+                         </div>
+                       )}
+                     </div>
+                   );
+                 })}
 
 
                 {/* 空状态 */}
@@ -2005,6 +2118,32 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                   <p className="text-[11px] text-slate-400 mt-1">选择后系统将自动生成一条带新截止时间的新任务</p>
                 </div>
               )}
+              {/* 持续项：先选本期是否有完成情况；无 → 免填说明与附件 */}
+              {resultItem.due_date_type === 'continuous' && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-2.5">本期是否有完成情况？</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { value: 'none', label: '无进展', note: '本期无事发生，免填', activeBg: 'bg-slate-500', border: 'border-slate-300', bg: 'bg-slate-50', text: 'text-slate-600' },
+                      { value: 'has',   label: '有进展', note: '需填说明 + 附截图',  activeBg: 'bg-blue-500',  border: 'border-blue-300', bg: 'bg-blue-50', text: 'text-blue-700' },
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setResultNone(opt.value === 'none')}
+                        className={`py-2.5 rounded-xl border-2 flex flex-col items-center gap-0.5 transition-all ${
+                          (opt.value === 'none') === resultNone
+                            ? `${opt.activeBg} border-transparent text-white shadow-md scale-[1.02]`
+                            : `${opt.bg} ${opt.border} ${opt.text} hover:scale-[1.01]`
+                        }`}
+                      >
+                        <span className="text-sm font-semibold">{opt.label}</span>
+                        <span className="text-[10px] opacity-70">{opt.note}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(resultItem.due_date_type !== 'continuous' || !resultNone) && (<>
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs font-medium text-slate-500">{resultItem.due_date_type === 'continuous' ? '进展说明' : '处理说明'} <span className="text-red-400">*</span></div>
@@ -2025,7 +2164,7 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                   <input id="kanban-img-upload" type="file" accept="image/*" multiple className="hidden"
                     onChange={e => setResultImages(prev => [...prev, ...Array.from(e.target.files || [])])} />
                   <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 或 拖拽图片至此</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
                   <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
                 </div>
                 {resultImages.length > 0 && (
@@ -2045,46 +2184,56 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                   </div>
                 )}
               </div>
+              </>)}
             </div>
             <div className="px-6 py-4 border-t border-slate-100 flex gap-3 mt-2">
               <button onClick={() => setResultItem(null)} className="px-5 h-10 border border-slate-200 text-slate-500 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors">取消</button>
               <button
                 onClick={async () => {
+                  const isCont = resultItem.due_date_type === 'continuous';
+                  const isNone = isCont && resultNone; // 持续项选「无进展」：免填说明与附件
                   // 未完成必须填下次完成时间
-                  if (resultItem.due_date_type !== 'continuous' && resultForm.status === 'blocked' && !nextDueDate) {
+                  if (!isCont && resultForm.status === 'blocked' && !nextDueDate) {
                     alert('请选择下次完成时间');
                     return;
                   }
-                  // 处理说明必填
-                  if (!resultForm.text.trim()) {
-                    alert('请填写处理说明');
-                    return;
-                  }
-                  // 图片附件必填（至少 1 张）
-                  if (resultImages.length === 0) {
-                    alert('请至少上传 1 张图片附件（截图、证明材料等）');
-                    return;
+                  if (!isNone) {
+                    // 处理说明/进展说明必填
+                    if (!resultForm.text.trim()) {
+                      alert(isCont ? '请填写进展说明' : '请填写处理说明');
+                      return;
+                    }
+                    // 图片附件必填（至少 1 张）——持续项选「有进展」同样需要证明截图
+                    if (resultImages.length === 0) {
+                      alert('请至少上传 1 张图片附件（截图、证明材料等）');
+                      return;
+                    }
                   }
                   setResultSubmitting(true);
                   try {
                     const imageUrls: string[] = [];
-                    for (const file of resultImages) {
-                      const fd = new FormData(); fd.append('file', file); fd.append('type', 'image');
-                      const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
-                      if (r.success) imageUrls.push(r.url);
+                    if (!isNone) {
+                      for (const file of resultImages) {
+                        const fd = new FormData(); fd.append('file', file); fd.append('type', 'image');
+                        const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
+                        if (r.success) imageUrls.push(r.url);
+                      }
                     }
                     await fetch(`/api/actions/${resultItem.id}`, {
                       method: 'PUT', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
-                        oa_result: resultForm.text,
+                        // 持续项「无进展」：内容统一为"无"，后台据此打 is_none 标记（不计有进展统计）
+                        oa_result: isNone ? '无' : resultForm.text,
                         oa_result_at: new Date().toISOString(),
                         // 持续项：不设处理结果，状态保持进行中，不写 oa_score
-                        ...(resultItem.due_date_type !== 'continuous'
-                          ? { oa_score: resultForm.status === 'done' ? 1 : resultForm.status === 'blocked' ? -1 : undefined, status: resultForm.status,
-                              next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined }
-                          : { status: 'in_progress' }),
+                        oa_none: isCont ? resultNone : undefined,
+                        ...(isCont
+                          ? { status: 'in_progress' }
+                          : { oa_score: resultForm.status === 'done' ? 1 : resultForm.status === 'blocked' ? -1 : undefined, status: resultForm.status,
+                              next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined }),
                         oa_auto_detected: false,
-                        oa_attachments: imageUrls.length > 0 ? imageUrls : ((resultItem as any).oa_attachments || []),
+                        // 「无进展」不保留历史附件，避免误导为有内容
+                        oa_attachments: isNone ? [] : (imageUrls.length > 0 ? imageUrls : ((resultItem as any).oa_attachments || [])),
                       }),
                     });
                     setResultItem(null); loadActions();
@@ -2098,7 +2247,7 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                 }`}
               >
                 {resultSubmitting ? <span className="flex items-center justify-center gap-2"><RefreshCw className="w-3.5 h-3.5 animate-spin" />提交中...</span>
-                  : resultItem.due_date_type === 'continuous' ? '更新进展'
+                  : resultItem.due_date_type === 'continuous' ? (resultNone ? '提交无进展' : '更新进展')
                   : resultForm.status === 'done' ? '标记完成' : resultForm.status === 'blocked' ? '标记未完成' : '更新进展'}
               </button>
             </div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/session';
 import { getOaPullConfig, updateOaPullConfig, getOaPullRuns, updateOaPullRuntime, recordRunStart, recordRunFinish } from '@/storage/database/oa-pull-config-storage';
 import { logOperation } from '@/lib/operation-log';
+import { guardWrite } from '@/lib/api-guard';
 import { executeOaPullResults } from '@/lib/oa-pull-runner';
 
 // GET /api/settings/oa-pull - 读取完整配置 + 最近执行历史
@@ -18,10 +19,8 @@ export async function GET() {
 // PUT /api/settings/oa-pull - 更新配置（白名单字段）+ 审计
 export async function PUT(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await request.json();
     const before = await getOaPullConfig();
     const config = await updateOaPullConfig({
@@ -41,7 +40,7 @@ export async function PUT(request: NextRequest) {
       targetType: 'system',
       targetId: 'oa-pull-config',
       summary: `更新OA回拉配置（cron=${config.cronExpr || '间隔'}/${config.intervalMin}分，增量=${config.incremental ? '开' : '关'}）`,
-      detail: { before, after: config, operator: user.loginid },
+      detail: { before, after: config, operator: guard.user.loginid },
     });
 
     return NextResponse.json({ success: true, data: config });
@@ -54,12 +53,14 @@ export async function PUT(request: NextRequest) {
 // POST /api/settings/oa-pull - 立即触发一次 OA 回拉
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || (user.loginid !== 'chenqiaoxia' && user.role !== 'admin')) {
-      return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
-    }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     // 直接调用回拉核心逻辑（不走内部 HTTP，避免无 cookie 未登录）
     const cfg = await getOaPullConfig();
+    // 停用状态下拒绝手动触发（防止旧 OA 数据回写覆盖系统内填报）
+    if (!cfg.enabled) {
+      return NextResponse.json({ success: false, error: 'OA 回拉已停用（填报已在系统内完成）。如需恢复，请先在调度设置中开启开关。' }, { status: 400 });
+    }
     const cursorAt = cfg.incremental && cfg.lastCursorAt ? cfg.lastCursorAt : null;
 
     // 记录运行历史（与定时调度一致）
@@ -92,7 +93,7 @@ export async function POST(request: NextRequest) {
       targetType: 'system',
       targetId: 'oa-pull-manual',
       summary: `手动触发OA回拉：${result.success ? '成功' : '失败'}`,
-      detail: { result, operator: user.loginid },
+      detail: { result, operator: guard.user.loginid },
     });
 
     return NextResponse.json({ success: result.success, data: { message: result.message }, error: result.error });

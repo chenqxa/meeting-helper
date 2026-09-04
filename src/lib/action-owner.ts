@@ -19,7 +19,7 @@ function normalize(value?: string | null): string {
   return (value || '').trim();
 }
 
-// 姓名 → 部门名（从本地组织架构反查），找不到返回 null
+// 姓名 → 部门名（先查本地组织架构，查不到降级 OA 通讯录反查），找不到返回 null
 export async function resolveDeptByName(name: string | null | undefined): Promise<string | null> {
   const n = normalize(name);
   if (!n) return null;
@@ -28,6 +28,12 @@ export async function resolveDeptByName(name: string | null | undefined): Promis
     const deptName = new Map(departments.map(d => [d.id, d.name]));
     const emp = employees.find(e => e.name?.trim() === n && e.status === 'active');
     if (emp && emp.departmentId) return deptName.get(emp.departmentId) || null;
+  } catch { /* ignore */ }
+  // 本地组织架构缺失/未同步（如生产容器无 org-data.json）时，降级用 OA 通讯录反查部门
+  try {
+    const matches = await searchOAUsers(n);
+    const exact = matches.find(u => u.lastname === n) || matches.find(u => u.lastname?.includes(n));
+    if (exact?.departmentname) return exact.departmentname;
   } catch { /* ignore */ }
   return null;
 }

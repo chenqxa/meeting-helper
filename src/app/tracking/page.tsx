@@ -290,6 +290,12 @@ export default function TrackingPage() {
   const [currentUserLoginId, setCurrentUserLoginId] = useState('');
   const [currentUserDept, setCurrentUserDept] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  // 企微完成通知卡片入口：?focusId=xx 聚焦到该条行动项（useEffect 读取，避免 hydration 不一致）
+  const [focusId, setFocusId] = useState<string | null>(null);
+  useEffect(() => {
+    const fid = new URLSearchParams(window.location.search).get('focusId');
+    if (fid) setFocusId(fid);
+  }, []);
 
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
@@ -335,6 +341,20 @@ export default function TrackingPage() {
     setNextDueDate('');
     setResultImages([]);
   };
+
+  // 汇报弹窗打开时：document 级粘贴监听，任意位置 Ctrl+V 微信/QQ 截图都能进附件
+  useEffect(() => {
+    if (!resultItem) return;
+    const handlePaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.items || []).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter((f): f is File => f !== null);
+      if (files.length > 0) {
+        e.preventDefault();
+        setResultImages(prev => [...prev, ...files.filter(f => f.type.startsWith('image/'))]);
+      }
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [resultItem]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -515,7 +535,9 @@ export default function TrackingPage() {
   }, [userRole, load]);
 
   const allYears = [...new Set(items.map(i => i.meeting_date?.slice(0, 4)).filter(Boolean))].sort().reverse();
-  const allDepts = [...new Set(items.map(i => i.dept).filter(Boolean))].sort() as string[];
+  const allDepts = [...new Set(
+    items.map(i => i.proposer_dept || proposerDeptMap[i.proposer || ''] || '').filter(Boolean)
+  )].sort() as string[];
   const allTypes = [...new Set(items.map(i => i.meeting_type).filter(Boolean))].sort() as string[];
   const allProposers = [...new Set(items.map(i => i.proposer).filter(Boolean))].sort() as string[];
   const allOwners = [...new Set(items.map(i => i.owner).filter(Boolean))].sort() as string[];
@@ -523,15 +545,19 @@ export default function TrackingPage() {
   const filtered = items.filter(i => {
     // 持续项不显示在行动项台账（另有「持续项跟进」页面）
     if (i.due_date_type === 'continuous') return false;
-    // 员工仅看自己负责的行动项
-    if (userRole === 'employee') {
-      if (i.owner !== currentUserName && i.owner !== currentUserLoginId) return false;
+    // 完成通知卡片聚焦模式：只显示该条（最后判断，优先级最高）
+    if (focusId && i.id !== focusId && (i as any).dbId !== focusId) return false;
+    // 员工仅看自己相关的行动项（责任人=我 或 提出人=我）
+    if (userRole === 'employee' || userRole === 'secretary') {
+      const isOwner = i.owner !== undefined && (i.owner === currentUserName || i.owner === currentUserLoginId);
+      const isProposer = i.proposer !== undefined && (i.proposer === currentUserName || i.proposer === currentUserLoginId);
+      if (!isOwner && !isProposer) return false;
     }
     if (search && !i.description.toLowerCase().includes(search.toLowerCase()) &&
         !i.owner?.toLowerCase().includes(search.toLowerCase()) &&
         !i.meeting_title?.toLowerCase().includes(search.toLowerCase())) return false;
     if (filterYear.length && !filterYear.includes(i.meeting_date?.slice(0, 4) ?? '')) return false;
-    if (filterDept.length && !filterDept.includes(i.dept ?? '')) return false;
+    if (filterDept.length && !filterDept.includes(i.proposer_dept || proposerDeptMap[i.proposer || ''] || '')) return false;
     if (filterType.length && !filterType.includes(i.meeting_type ?? '')) return false;
     if (filterProposer.length && !filterProposer.includes(i.proposer ?? '')) return false;
     if (filterOwner.length && !filterOwner.includes(i.owner ?? '')) return false;
@@ -673,7 +699,7 @@ export default function TrackingPage() {
       {userRole === 'employee' && (
         <div className="mb-3 flex items-center gap-2 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-700">
           <User className="w-3.5 h-3.5 flex-shrink-0" />
-          仅显示您（{currentUserName}）负责的行动项
+          仅显示您（{currentUserName}）相关（负责或提出）的行动项
         </div>
       )}
       {userRole === 'manager' && currentUserDept && (
@@ -857,6 +883,19 @@ export default function TrackingPage() {
         )}
       </div>
 
+      {/* 完成通知卡片聚焦提示条 */}
+      {focusId && (
+        <div className="mb-3 px-4 py-2.5 bg-emerald-50 border border-emerald-100 rounded-xl flex items-center justify-between gap-3">
+          <span className="text-xs text-emerald-700 truncate">
+            ✅ 行动项完成情况（{filtered.length}条）
+          </span>
+          <button
+            onClick={() => setFocusId(null)}
+            className="text-xs text-emerald-700 hover:text-emerald-900 font-medium whitespace-nowrap"
+          >查看全部台账</button>
+        </div>
+      )}
+
       {/* 台账表格 */}
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
@@ -903,7 +942,9 @@ export default function TrackingPage() {
                 </th>
                 <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">评分</th>
                 <th className="text-left px-4 py-3 font-semibold text-slate-600 min-w-[160px]">OA回传内容</th>
+                {userRole === 'admin' && (
                 <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">操作</th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -1066,7 +1107,8 @@ export default function TrackingPage() {
                       );
                       })()}
                     </td>
-                    {/* 操作列 */}
+                    {/* 操作列 — 仅 admin 显示（稽核/汇报/重派均为管理操作，普通角色整列隐藏） */}
+                    {userRole === 'admin' && (
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="flex items-center gap-1">
                         {/* 人工稽核 V/X/0 — 仅 admin；打上标记后锁定，防误点 */}
@@ -1078,7 +1120,8 @@ export default function TrackingPage() {
                             const next = mark === val ? null : val; // 点当前选中=清除，点其他被禁用
                             const body: any = { oa_score: next, oa_auto_detected: false };
                             if (next !== null) body.status = next === -1 ? 'blocked' : 'done'; // V/0→done，X→blocked
-                            setItems(prev => prev.map(p => p.id === item.id ? { ...p, oa_score: next, oa_auto_detected: false, status: next === null ? p.status : (next === -1 ? 'blocked' : 'done') } : p));
+                            else body.status = item.status === 'blocked' ? 'pending' : 'in_progress'; // 清除标记：同步恢复状态，避免 done/blocked 残留误判已完成
+                            setItems(prev => prev.map(p => p.id === item.id ? { ...p, oa_score: next, oa_auto_detected: false, status: next === null ? (item.status === 'blocked' ? 'pending' : 'in_progress') : (next === -1 ? 'blocked' : 'done') } : p));
                             await fetch(`/api/actions/${item.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                           };
                           const btnCls = (active: boolean, color: string, activeBg: string) =>
@@ -1106,8 +1149,8 @@ export default function TrackingPage() {
                           >0</button>
                           </>);
                         })()}
-                        {/* 填写结果 — 仅 admin */}
-                        {userRole === 'admin' && (
+                        {/* 填写结果 — admin 或责任人本人（后端自报校验兜底） */}
+                        {(userRole === 'admin' || (currentUserName && item.owner === currentUserName) || (currentUserLoginId && item.owner === currentUserLoginId)) && (
                         <button
                           title="填写 / 修改处理结果"
                           onClick={() => openResult(item)}
@@ -1133,6 +1176,7 @@ export default function TrackingPage() {
                         )}
                       </div>
                     </td>
+                    )}
                   </tr>
                 );
               })}
@@ -1140,7 +1184,7 @@ export default function TrackingPage() {
             {sorted.length > 0 && (
               <tfoot>
                 <tr className="bg-slate-50 border-t-2 border-slate-200">
-                  <td colSpan={9} className="px-3 py-2 text-xs font-semibold text-slate-600">
+                  <td colSpan={userRole === 'admin' ? 9 : 8} className="px-3 py-2 text-xs font-semibold text-slate-600">
                     共 {sorted.length} 条 &nbsp;
                     <span className="text-emerald-600">V: {sorted.filter(i => effectiveScore(i) === 1).length}</span>
                     &nbsp;&nbsp;
@@ -1419,7 +1463,10 @@ export default function TrackingPage() {
 
               {/* 图片上传 */}
               <div>
-                <div className="text-xs font-medium text-slate-500 mb-2">图片附件 <span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（截图、证明材料等，至少上传 1 张）</span></div>
+                <div className="text-xs font-medium text-slate-500 mb-2">图片附件 {resultItem.due_date_type === 'continuous'
+                  ? <span className="text-slate-300 font-normal">（可选，有进展证据时上传）</span>
+                  : <><span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（截图、证明材料等，至少上传 1 张）</span></>}
+                </div>
                 <div
                   className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-pointer group"
                   onClick={() => document.getElementById('result-img-upload')?.click()}
@@ -1433,7 +1480,7 @@ export default function TrackingPage() {
                   <input id="result-img-upload" type="file" accept="image/*" multiple className="hidden"
                     onChange={e => { setResultImages(prev => [...prev, ...Array.from(e.target.files || [])]); }} />
                   <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 或 拖拽图片至此</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
                   <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
                 </div>
                 {resultImages.length > 0 && (
@@ -1477,8 +1524,8 @@ export default function TrackingPage() {
                     alert('请填写处理说明');
                     return;
                   }
-                  // 图片附件必填（至少 1 张）
-                  if (resultImages.length === 0) {
+                  // 图片附件必填（至少 1 张）——持续项周期汇报可选（"无进展"为合法状态，无图可传）
+                  if (resultItem.due_date_type !== 'continuous' && resultImages.length === 0) {
                     alert('请至少上传 1 张图片附件（截图、证明材料等）');
                     return;
                   }
@@ -1505,7 +1552,11 @@ export default function TrackingPage() {
                         oa_attachments: imageUrls,
                       }),
                     });
-                    if (res.ok) { setResultItem(null); load(); }
+                    if (res.ok) {
+                      const r = await res.json().catch(() => null as any);
+                      if (r?.rescheduledError) alert(`汇报已保存，但自动重派未执行：${r.rescheduledError}`);
+                      setResultItem(null); load();
+                    }
                   } finally { setResultSubmitting(false); }
                 }}
                 disabled={resultSubmitting}

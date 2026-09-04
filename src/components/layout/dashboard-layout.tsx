@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   Mic, FileText, Settings, Home, LayoutGrid, Building2,
   LogOut, ClipboardList, Menu, Plus, MessageSquareWarning, RefreshCw, FolderOpen,
-  Presentation, ScrollText, PanelLeftClose, PanelLeftOpen
+  Presentation, ScrollText, PanelLeftClose, PanelLeftOpen, Trophy
 } from 'lucide-react';
 import { useEffect, useState, useCallback } from 'react';
 import { AiAssistant } from '@/components/ui/ai-assistant';
@@ -24,6 +24,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/meetings': '会议中心',
   '/kanban': '待办中心',
   '/tracking': '行动项台账',
+  '/contribution': '贡献看板',
   '/feedback': '反馈台账',
   '/projects': '项目协同',
   '/push-preview': '推送预览',
@@ -54,6 +55,7 @@ export default function DashboardLayout({ children }: LayoutProps) {
   });
   const [isSubmittingLog, setIsSubmittingLog] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [userPerms, setUserPerms] = useState<Set<string>>(new Set());
 
   // 获取项目列表供快捷录入使用
   useEffect(() => {
@@ -173,6 +175,23 @@ export default function DashboardLayout({ children }: LayoutProps) {
       })
       .catch(() => {})
       .finally(() => setNavReady(true));
+    // 当前用户权限点（侧边栏菜单按权限显隐）
+    // 先用 sessionStorage 缓存秒开侧边栏，再后台刷新（接口需查多表，600ms~2.6s）
+    const cachedPerms = sessionStorage.getItem('auth_perms');
+    if (cachedPerms) {
+      try {
+        setUserPerms(new Set(JSON.parse(cachedPerms) as string[]));
+      } catch {}
+    }
+    fetch('/api/permissions/mine')
+      .then(r => r.json())
+      .then(d => {
+        if (d.success && Array.isArray(d.data?.permissions)) {
+          setUserPerms(new Set(d.data.permissions as string[]));
+          sessionStorage.setItem('auth_perms', JSON.stringify(d.data.permissions));
+        }
+      })
+      .catch(() => {})
     fetch('/api/actions/mine')
       .then(r => r.json())
       .then(async d => {
@@ -235,16 +254,17 @@ export default function DashboardLayout({ children }: LayoutProps) {
         { icon: FileText, label: '会议中心', href: '/meetings', roles: ['admin', 'manager', 'secretary', 'employee'] },
         // 项目协同暂时隐藏，所有人不可见；需要时取消下一行注释即可
         // { icon: Building2, label: '项目协同', href: '/projects', roles: ['admin', 'manager', 'secretary'] },
-        { icon: Presentation, label: '周例会看板', href: '/weekly-board', roles: ['admin', 'manager', 'secretary'] },
-        { icon: Presentation, label: '月度看板', href: '/monthly-board', roles: ['admin', 'manager', 'secretary'] },
-        { icon: Presentation, label: '产销会看板', href: '/production-board', roles: ['admin', 'manager', 'secretary'] },
+        { icon: Presentation, label: '周例会看板', href: '/weekly-board', perm: 'canViewBoard' },
+        { icon: Presentation, label: '月度看板', href: '/monthly-board', perm: 'canViewBoard' },
+        { icon: Presentation, label: '产销会看板', href: '/production-board', perm: 'canViewBoard' },
       ]
     },
     {
       label: '管理配置',
       items: [
-        { icon: ClipboardList, label: '行动项台账', href: '/tracking', roles: ['admin', 'manager'] },
-        { icon: RefreshCw, label: '持续项跟进', href: '/continuous', roles: ['admin', 'manager', 'secretary'] },
+        { icon: ClipboardList, label: '行动项台账', href: '/tracking', perm: 'canViewTracking' },
+        { icon: RefreshCw, label: '持续项跟进', href: '/continuous', perm: 'canViewContinuous' },
+        { icon: Trophy, label: '贡献看板', href: '/contribution', roles: ['admin', 'manager'] },
         { icon: MessageSquareWarning, label: '反馈台账', href: '/feedback', roles: ['admin', 'manager', 'employee'] },
         { icon: FolderOpen, label: '批次管理', href: '/batches', roles: ['admin', 'manager', 'secretary', 'employee'] },
       ]
@@ -253,20 +273,30 @@ export default function DashboardLayout({ children }: LayoutProps) {
       label: '系统管理',
       collapsible: true,
       items: [
-        { icon: Building2, label: '组织', href: '/org', roles: ['admin'] },
-        { icon: Settings, label: '基础设置', href: '/settings', roles: ['admin'] },
-        { icon: Building2, label: 'OA 同步', href: '/oa-sync', roles: ['admin'] },
-        { icon: ScrollText, label: '操作日志', href: '/logs', roles: ['admin'], loginids: ['chenqiaoxia'] },
+        { icon: Building2, label: '组织', href: '/org', perm: 'canViewOrg' },
+        { icon: Settings, label: '基础设置', href: '/settings', perm: 'canManageRoles' },
+        // OA 同步入口已隐藏：填报转系统内完成，OA 回拉已停用（页面 /oa-sync 仍可直接访问查看历史）
+        // { icon: Building2, label: 'OA 同步', href: '/oa-sync', perm: 'canManagePushConfig' },
+        { icon: ScrollText, label: '操作日志', href: '/logs', perm: 'canManageRoles', loginids: ['chenqiaoxia'] },
       ]
     }
   ];
 
   const navGroups = allNavGroups.map(group => ({
     ...group,
-    items: group.items.filter(item =>
-      item.roles.includes(role) &&
-      (!(item as any).loginids || (item as any).loginids.includes(currentUser?.loginid))
-    )
+    items: group.items.filter(item => {
+      const it = item as any;
+      // 权限点控制（受限菜单）
+      if (it.perm) {
+        if (!userPerms.has(it.perm)) return false;
+      } else if (it.roles && !it.roles.includes(role)) {
+        // 角色数组控制（部分菜单保留）
+        return false;
+      }
+      // loginids 白名单（如操作日志仅 chenqiaoxia）
+      if (it.loginids && !it.loginids.includes(currentUser?.loginid)) return false;
+      return true;
+    })
   })).filter(group => group.items.length > 0);
 
   const pageTitle = PAGE_TITLES[pathname]

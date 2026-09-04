@@ -377,7 +377,7 @@ export default function FeedbackPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-slate-800">
-                        <div className="font-medium line-clamp-1" title={item.title}>{item.title}</div>
+                        <div className="font-medium break-all" title={item.title}>{item.title}</div>
                         {!isExpanded && (
                           <div className="text-[11px] text-slate-400 line-clamp-1 mt-0.5">{item.content}</div>
                         )}

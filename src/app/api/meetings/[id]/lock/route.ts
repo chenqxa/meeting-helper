@@ -6,6 +6,7 @@ import { sendTextCardMessage, resolveUserIdsByNames } from '@/lib/wecom-message'
 import { batchSendOAUserMessage } from '@/lib/chat-client';
 import { searchOAUsers } from '@/lib/weaver-notify';
 import { sendScheduledTodos } from '@/lib/todo-push';
+import { syncMeetingActionsToWeCom } from '@/lib/wecom-action-push';
 import { logOperation } from '@/lib/operation-log';
 
 async function getMeetingActionItemsForOAPush(meetingId: string, meeting: any) {
@@ -350,6 +351,29 @@ export async function POST(
       todoPush = { status: 'failed', sent: 0, failures: 0, message: e instanceof Error ? e.message : '推送异常' };
     }
 
+    // ── 企微行动项推送（并行新通道：按责任人发汇总卡片，OAuth 直达 mytasks 填写）──
+    let wecomActionPush: {
+      status: 'success' | 'failed' | 'skipped' | 'timeout';
+      sent: number;
+      skipped: number;
+      failed: number;
+      errors: string[];
+    } = { status: 'skipped', sent: 0, skipped: 0, failed: 0, errors: [] };
+
+    try {
+      if (actionItems.length > 0) {
+        const timeout = Promise.resolve({ status: 'timeout' as const, sent: 0, skipped: 0, failed: 0, errors: ['推送后台进行中'] });
+        const wait = new Promise<typeof wecomActionPush>(resolve => setTimeout(() => resolve(timeout), 3000));
+        wecomActionPush = await Promise.race([
+          syncMeetingActionsToWeCom(meeting, actionItems, newVersion),
+          wait,
+        ]);
+      }
+    } catch (e) {
+      console.error('[lock] 企微行动项推送异常（不影响归档）:', e);
+      wecomActionPush = { status: 'failed', sent: 0, skipped: 0, failed: 0, errors: [e instanceof Error ? e.message : '推送异常'] };
+    }
+
     return NextResponse.json({
       success: true,
       message: '版本已锁定',
@@ -359,6 +383,7 @@ export async function POST(
         wecomPush,
         imPush,
         todoPush,
+        wecomActionPush,
       },
     });
   } catch (error) {

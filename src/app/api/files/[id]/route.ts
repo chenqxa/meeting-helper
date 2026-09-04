@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { readFileFromDb } from '@/storage/database/file-storage';
 
 export async function GET(
   _request: NextRequest,
@@ -16,9 +17,6 @@ export async function GET(
       return NextResponse.json({ success: false, error: '非法路径' }, { status: 403 });
     }
 
-    const stat = await fs.stat(filePath);
-    const buffer = await fs.readFile(filePath);
-
     const ext = path.extname(id).toLowerCase();
     const mimeMap: Record<string, string> = {
       '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -31,14 +29,38 @@ export async function GET(
       '.txt': 'text/plain; charset=utf-8', '.rtf': 'application/rtf',
     };
 
-    return new NextResponse(buffer, {
-      status: 200,
-      headers: {
-        'Content-Type': mimeMap[ext] || 'application/octet-stream',
-        'Content-Length': String(stat.size),
-        'Cache-Control': 'public, max-age=86400',
-      },
-    });
+    // 1) 优先读数据库（主存储：部署重建容器/换机器都不丢）
+    try {
+      const dbFile = await readFileFromDb(id);
+      if (dbFile) {
+        return new NextResponse(new Uint8Array(dbFile.buffer), {
+          status: 200,
+          headers: {
+            'Content-Type': dbFile.mime || mimeMap[ext] || 'application/octet-stream',
+            'Content-Length': String(dbFile.buffer.length),
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('[files] 读库失败，回退磁盘:', e instanceof Error ? e.message : e);
+    }
+
+    // 2) 回退磁盘（兼容历史落盘文件；容器重建后旧文件可能已不存在）
+    try {
+      const stat = await fs.stat(filePath);
+      const buffer = await fs.readFile(filePath);
+      return new NextResponse(buffer, {
+        status: 200,
+        headers: {
+          'Content-Type': mimeMap[ext] || 'application/octet-stream',
+          'Content-Length': String(stat.size),
+          'Cache-Control': 'public, max-age=86400',
+        },
+      });
+    } catch {
+      // 磁盘也没有 → 404
+    }
   } catch {
     return NextResponse.json({ success: false, error: '文件不存在' }, { status: 404 });
   }

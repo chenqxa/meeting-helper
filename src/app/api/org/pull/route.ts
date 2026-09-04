@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 
 // 泛微OA API配置（从环境变量读取）
 const WEAVER_API_URL = process.env.WEAVER_API_URL || '';
@@ -7,6 +8,8 @@ const WEAVER_API_KEY = process.env.WEAVER_API_KEY || '';
 // POST /api/org/pull - 从泛微OA拉取组织架构数据
 export async function POST() {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     if (!WEAVER_API_URL || !WEAVER_API_KEY) {
       return NextResponse.json(
         { success: false, error: '未配置泛微OA API地址和密钥，请在.env文件中设置 WEAVER_API_URL 和 WEAVER_API_KEY' },

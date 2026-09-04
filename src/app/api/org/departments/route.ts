@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardWrite } from '@/lib/api-guard';
 import { createDepartment, getDepartments } from '@/storage/database/org-storage';
 
 // GET /api/org/departments - 获取所有部门列表
@@ -18,6 +19,8 @@ export async function GET() {
 // POST /api/org/departments - 创建部门
 export async function POST(request: NextRequest) {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
     const body = await request.json();
     const { name, code, parentId, managerId, description, sort = 0, status = 'active' } = body;
 

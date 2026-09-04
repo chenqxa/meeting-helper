@@ -31,6 +31,8 @@ export interface ActionItem {
   reassignedTo?: string | null;     // 重新派发：原 X 项指向新项 id
   proposerDept?: string | null;     // 提出部门（导入/匹配时的快照）
   cycleDate?: string | null;        // 周期任务：归属周期日期（如持续项每周任务的 YYYY-MM-DD）
+  autoFetch?: boolean;              // 持续项「自动取数」标记：开启后不再催人填报，由系统每周定时自动取数（取不到则不写）
+  autoFetchSource?: string | null;  // 自动取数绑定的「取数源」key（见 lib/auto-fetch-sources-meta）
 
   confirmedBy?: string | null;
   confirmedAt?: string | null;
@@ -218,6 +220,14 @@ export async function ensureTable(p: sql.ConnectionPool) {
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'cycle_date')
     ALTER TABLE hyzs_action_items ADD cycle_date NVARCHAR(10) NULL
   `);
+  await p.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_fetch')
+    ALTER TABLE hyzs_action_items ADD auto_fetch INT NULL
+  `);
+  await p.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_fetch_source')
+    ALTER TABLE hyzs_action_items ADD auto_fetch_source NVARCHAR(64) NULL
+  `);
 
   // backfill existing rows
   await p.request().query(`
@@ -368,6 +378,8 @@ function rowToActionItem(row: any): ActionItem {
     reassignedTo: row.reassigned_to || null,
     proposerDept: row.proposer_dept || null,
     cycleDate: row.cycle_date || null,
+    autoFetch: !!row.auto_fetch,
+    autoFetchSource: row.auto_fetch_source || null,
     confirmedBy: row.confirmed_by || null,
     confirmedAt: row.confirmed_at || null,
     completedBy: row.completed_by || null,
@@ -603,6 +615,20 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
 
   invalidateListCache();
   return updated;
+};
+
+// 开启/关闭持续项「自动取数」标记并绑定取数源（仅 admin；专用轻量更新，不动其他字段）
+export const updateActionAutoFetch = async (id: string, enabled: boolean, sourceKey?: string | null): Promise<boolean> => {
+  const p = await getPool();
+  const now = new Date().toISOString();
+  const r = await p.request()
+    .input('id', sql.NVarChar, id)
+    .input('auto_fetch', sql.Int, enabled ? 1 : 0)
+    .input('auto_fetch_source', sql.NVarChar, enabled ? (sourceKey || null) : null)
+    .input('updated_at', sql.NVarChar, now)
+    .query(`UPDATE hyzs_action_items SET auto_fetch=@auto_fetch, auto_fetch_source=@auto_fetch_source, updated_at=@updated_at WHERE id=@id`);
+  invalidateListCache();
+  return (r.rowsAffected[0] || 0) > 0;
 };
 
 export const deleteActionItem = async (id: string): Promise<boolean> => {

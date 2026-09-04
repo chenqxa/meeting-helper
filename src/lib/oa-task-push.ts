@@ -213,7 +213,7 @@ async function pushViaSql(task: OATaskPayload): Promise<void> {
   const p = await getAppPool();
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
-  const timeStr = now.toTimeString().slice(0, 8);
+  const timeStr = now.toISOString().slice(11, 19); // 强制 UTC：与服务器(UTC时区)行为一致，避免本地调试写入本地时间导致显示偏移
   const priorityInt = PRIORITY_MAP[task.priority] ?? 2;
   const statusInt = STATUS_MAP[task.status] ?? 0;
   const tbl = oaTable('uf_meetingplan');

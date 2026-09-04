@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getMeetings, updateMeeting } from '@/storage';
+import { guardWrite } from '@/lib/api-guard';
 
 // POST /api/actions/settle
 // 将所有超期且无 OA 回传的行动项 oa_score 写入 -1，供个人积分汇总使用
 export async function POST() {
   try {
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
+
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const meetings = await getMeetings();
     let settled = 0;

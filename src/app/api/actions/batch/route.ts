@@ -4,6 +4,7 @@ import { getCurrentUser } from '@/lib/session';
 import { resolveActionOwnerIdentity } from '@/lib/action-owner';
 import { logOperation } from '@/lib/operation-log';
 import { getEmployees, getDepartments } from '@/storage/database/org-storage';
+import { guardWrite } from '@/lib/api-guard';
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,6 +12,8 @@ export async function POST(request: NextRequest) {
     if (!user) {
       return NextResponse.json({ success: false, error: '未登录' }, { status: 401 });
     }
+    const guard = await guardWrite('admin');
+    if (!guard.ok) return guard.response;
 
     const body = await request.json();
     const { title, sourceChannel, items } = body;

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateFile, generateSafeFilename } from '@/lib/file-validator';
+import { saveFileToDb } from '@/storage/database/file-storage';
 import { promises as fs } from 'fs';
 import path from 'path';
 
@@ -83,8 +84,17 @@ export async function POST(request: NextRequest) {
     // 确保目录存在
     await fs.mkdir(uploadDir, { recursive: true });
 
-    // 保存文件
-    await fs.writeFile(filePath, validation.buffer!);
+    // 1) 入库（主存储：容器/磁盘随时可能被重建清空，库里才可靠）
+    try {
+      await saveFileToDb(safeFilename, expectedMimeType, validation.buffer!);
+    } catch (dbErr) {
+      console.error('[upload] 附件入库失败（将继续落盘）:', dbErr instanceof Error ? dbErr.message : dbErr);
+    }
+
+    // 2) 落盘（本地缓存，读取时可免一次查库）
+    await fs.writeFile(filePath, validation.buffer!).catch(diskErr => {
+      console.warn('[upload] 附件写盘失败（不影响，库里已有）:', diskErr instanceof Error ? diskErr.message : diskErr);
+    });
 
     // 返回文件ID，前端通过API访问
     return NextResponse.json({

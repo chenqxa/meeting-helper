@@ -39,6 +39,8 @@ COPY --from=builder /app/node_modules    ./node_modules
 COPY --from=builder /app/package.json    ./package.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 COPY --from=builder /app/tsconfig.json   ./tsconfig.json
+# 组织架构数据（提出人/责任人部门反查依赖）；运行时由 compose 挂载覆盖
+COPY --from=builder /app/org-data.json   ./org-data.json
 
 EXPOSE 5000
 

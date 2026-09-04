@@ -14,19 +14,23 @@ const WECOM_VERIFY_FILES: Record<string, string> = {
   'WW_verify_nxdIbimKG021ox1q.txt': 'nxdIbimKG021ox1q',
 };
 
-// 不需要登录的路径
+// 永久公开：无登录可访问（健康检查/登录本身/分享验证等）
 const PUBLIC_PATHS = [
   '/login',
   '/api/auth/',
   '/api/health', '/api/health/',
-  '/api/admin/cleanup-orphans',
-  '/api/seed',
-  '/api/debug/',
   '/task-confirm/',
   '/_next/',
   '/favicon',
   '/meeting/share/', // 分享链接页面
   '/api/meetings/share/', // 分享链接验证API
+];
+
+// 调试/种子类：仅非生产环境放行；生产访问 → 落到统一 session 校验 → 401
+const DEBUG_PATHS = [
+  '/api/admin/cleanup-orphans',
+  '/api/seed',
+  '/api/debug/',
 ];
 
 // 轻量 session 解析
@@ -81,8 +85,13 @@ export function middleware(request: NextRequest) {
     return handleWeComVerify(pathname);
   }
 
-  // 检查是否是通过分享链接访问会议详情页
-  if (pathname.startsWith('/meeting/') && !pathname.startsWith('/meeting/share/')) {
+  // 检查是否是通过分享链接访问会议详情页 / 我的任务页（企微卡片入口，OAuth 免密）
+  const isSharedPath =
+    (pathname.startsWith('/meeting/') && !pathname.startsWith('/meeting/share/')) ||
+    pathname === '/mytasks' || pathname === '/mytasks/' ||
+    pathname === '/kanban' || pathname === '/kanban/' ||
+    pathname === '/tracking' || pathname === '/tracking/';
+  if (isSharedPath) {
     const url = request.nextUrl;
     const isSharedAccess = url.searchParams.get('shared') === 'true';
 
@@ -130,6 +139,11 @@ export function middleware(request: NextRequest) {
 
   // 放行公开路径
   if (PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
+    return NextResponse.next();
+  }
+
+  // 调试/种子路径：仅非生产环境放行（生产环境落到下方 session 校验 → 401）
+  if (DEBUG_PATHS.some(p => pathname.startsWith(p)) && process.env.NODE_ENV !== 'production') {
     return NextResponse.next();
   }
 

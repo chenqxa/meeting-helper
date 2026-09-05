@@ -55,7 +55,7 @@ export async function GET() {
     `);
 
     const oaBase = process.env.WEAVER_OA_URL || '';
-    const tasks = (r.recordset || []).map((row: any) => {
+    const tasks: any[] = (r.recordset || []).map((row: any) => {
       const taskId = String(row.task_id || '').trim();
       // task_id: CONT_周例会_2026-08-05__ACT_xxx_2026-08-05
       const parts = taskId.split('__');
@@ -131,6 +131,8 @@ export async function GET() {
       t.syncedAt = match?.syncedAt || String(t.modifyTime || '').trim() || null;
       t.source = match?.source || 'OA';
       t.reportSource = match?.source || (oaFilled ? 'OA' : '未填');
+      // 系统内(会议助手)填报的附件：取该行动项当前 oa_attachments（本地 /api/files 图片）
+      t.localAttachments = t.source === '会议助手' ? (actionMap.get(t.actionId)?.oaAttachments || []) : [];
     }
 
     // ── 合并未被推送周期覆盖的「会议助手」填报（该持续项没有对应 OA 推送，如新导入尚未推送）──
@@ -166,6 +168,7 @@ export async function GET() {
           source: '会议助手',
           reportSource: '会议助手',
           attachments: [],
+          localAttachments: action?.oaAttachments || [],
         });
       }
     }

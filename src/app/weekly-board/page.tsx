@@ -206,7 +206,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period, contPerio
           <div className="col-span-12">
             <div className="flex items-center gap-2 mb-2">
               <RefreshCw className="w-4 h-4 text-slate-400" />
-              <h3 className="text-base font-bold text-slate-700">持续项（{stats.contTotal} 项 · 填报窗口 {contPeriodText || '—'}）</h3>
+              <h3 className="text-base font-bold text-slate-700">持续项（{stats.contTotal} 项 · 填报时间 {contPeriodText || '—'}）</h3>
             </div>
             <div className="grid grid-cols-3 gap-4">
               {contCards.map(c => (
@@ -531,7 +531,7 @@ function ContinuousSlide({ items, mode, progressMap, periodText, onShowDetail }:
   const iconColor = isDone ? 'text-emerald-400' : 'text-amber-400';
   const badgeBg = isDone ? 'bg-emerald-500/15 ring-emerald-400/30' : 'bg-amber-500/15 ring-amber-400/30';
   const icon = isDone ? RefreshCw : Clock;
-  const subtitle = isDone ? 'CONTINUOUS · 持续项稽核' : `CONTINUOUS · 持续项填报汇报（${periodText || '本期'}）`;
+  const subtitle = isDone ? 'CONTINUOUS · 持续项稽核' : `CONTINUOUS · 填报时间：${periodText || '本期'}`;
   const badgeText = isDone ? '稽核' : '汇报中';
   const title = isDone ? '持续项稽核' : '持续项汇报';
   const IconComp = icon;
@@ -629,7 +629,7 @@ function ContinuousSlide({ items, mode, progressMap, periodText, onShowDetail }:
                                   >
                                     {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
                                   </button>
-                                  <p className="text-[13px] text-slate-400">{pr.cycleDate} 填报</p>
+                                  <p className="text-[13px] text-slate-400">自动取数 · 数据至 {(pr.cycleDate || '').slice(5).replace('-', '/')}</p>
                                 </div>
                               );
                             }
@@ -725,7 +725,7 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 export default function WeeklyBoardPage() {
   const [items, setItems] = useState<BoardItem[]>([]);
   // 持续项全部周期填报记录（actionId → 按周期过滤后取展示）
-  const [progressAll, setProgressAll] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }[]>>({});
+  const [progressAll, setProgressAll] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }[]>>({});
   const [loading, setLoading] = useState(true);
   const [immersive, setImmersive] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -745,11 +745,11 @@ export default function WeeklyBoardPage() {
       // 拉取持续项周期填报进展（actionId → 进展列表），保留全部记录按统计周期过滤
       const pr = await fetch('/api/continuous/progress').then(r => r.json());
       if (pr.success) {
-        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }[]> = {};
+        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }[]> = {};
         for (const [actionId, recs] of Object.entries(pr.data || {})) {
           map[actionId] = ((recs as any[]) || [])
             .filter(x => x.cycleDate)
-            .map(x => ({ progress: x.progress || null, cycleDate: String(x.cycleDate).slice(0, 10), syncedAt: x.syncedAt, detail: x.detail ?? null }));
+            .map(x => ({ progress: x.progress || null, cycleDate: String(x.cycleDate).slice(0, 10), syncedAt: x.syncedAt, source: x.source || '', detail: x.detail ?? null }));
         }
         setProgressAll(map);
       }
@@ -868,14 +868,18 @@ export default function WeeklyBoardPage() {
   const contPeriodText = `${contPeriod.start.getMonth() + 1}/${contPeriod.start.getDate()}~${contPeriod.end.getMonth() + 1}/${contPeriod.end.getDate()}`;
 
   // 填报窗口内的持续项填报（每项取窗口内最新一条）；窗口内无填报则不出现 → 显示"未填报"
+  // 口径：同一窗口内「责任人的真实填报」优先于「自动取数」，保证人工填的内容不被自动汇总盖掉
   const progressInWeek = useMemo(() => {
     const s = fmtDate(contPeriod.start), e = fmtDate(contPeriod.end);
-    const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }> = {};
+    const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }> = {};
     for (const [id, recs] of Object.entries(progressAll)) {
       const inWeek = recs
         .filter(r => r.cycleDate >= s && r.cycleDate <= e)
         .sort((a, b) => b.cycleDate.localeCompare(a.cycleDate));
-      if (inWeek[0]) map[id] = inWeek[0];
+      if (inWeek.length === 0) continue;
+      // 真实填报 = 系统内/ OA 来源（非『自动取数』）
+      const manual = inWeek.filter(r => r.source && r.source !== '自动取数');
+      map[id] = manual[0] || inWeek[0];
     }
     return map;
   }, [progressAll, contPeriod]);

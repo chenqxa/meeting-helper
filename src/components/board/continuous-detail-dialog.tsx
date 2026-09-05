@@ -8,7 +8,7 @@
 //   supplier 新供应商评审    申请日期/供应商名称/联系人/评审产品/类别/质量分/结论
 import React, { useEffect } from 'react';
 import { X, FileText, Info } from 'lucide-react';
-import { autoFetchSourceDesc } from '@/lib/auto-fetch-sources-meta';
+import { autoFetchSourceInfo } from '@/lib/auto-fetch-sources-meta';
 
 export interface AutoDetailBill {
   kind?: string;
@@ -90,7 +90,7 @@ export default function ContinuousDetailDialog({ item, onClose }: { item: AutoDe
   const bills = (Array.isArray(item.detail) ? item.detail : []) as AutoDetailBill[];
   const kind = bills[0]?.kind || 'scrap';
   const totalLines = bills.reduce((s, b) => s + (b.lines?.length || 0), 0);
-  const desc = autoFetchSourceDesc(item.sourceKey);
+  const info = autoFetchSourceInfo(item.sourceKey);
 
   const baseCols = COLS[kind] || COLS.scrap;
   const hasPrice = kind === 'price' && bills.some(b => (b.lines || []).some((ln: any) => ln.priceOld != null || ln.priceNew != null || ln.final != null));
@@ -120,10 +120,14 @@ export default function ContinuousDetailDialog({ item, onClose }: { item: AutoDe
           </button>
         </div>
 
-        {desc && (
-          <div className="px-6 py-2.5 bg-blue-50/70 border-b border-blue-100 text-xs text-slate-600 leading-relaxed flex items-start gap-1.5">
-            <Info className="w-3.5 h-3.5 text-blue-400 flex-shrink-0 mt-0.5" />
-            <span><span className="font-semibold text-blue-700">自动取数口径：</span>{desc}</span>
+        {info && (
+          <div className="px-6 py-2.5 bg-blue-50/60 border-b border-blue-100 space-y-1 text-xs leading-relaxed">
+            <div className="flex items-center gap-1.5 font-semibold text-blue-700">
+              <Info className="w-3.5 h-3.5" /> 自动取数说明
+            </div>
+            <p className="text-slate-700"><span className="text-slate-400">数据来源：</span>{info.src}</p>
+            <p className="text-slate-700"><span className="text-slate-400">取数规则：</span>{info.how}</p>
+            <p className="text-slate-700"><span className="text-slate-400">更新：</span>{info.when}</p>
           </div>
         )}
 

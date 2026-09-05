@@ -230,6 +230,16 @@ export default function ContinuousPage() {
     }
   }, []);
 
+  // 本地附件（系统填报上传，/api/files/xxx）直接预览/打开
+  const openLocalFile = useCallback((url: string) => {
+    const name = decodeURIComponent(url.split('/').filter(Boolean).pop() || '附件');
+    const ext = (url.split('?')[0].split('.').pop() || '').toLowerCase();
+    const kind = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext) ? 'image'
+      : ext === 'pdf' ? 'pdf'
+        : ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'].includes(ext) ? 'office' : 'other';
+    setPreview({ url, filename: name, kind, loading: false, error: '' });
+  }, []);
+
   // 开启/关闭「自动取数」：自动取数的持续项每周由系统定时自动写入本期进展，不再催人填报；
   // 开启时绑定取数源（目前默认首个可用源「呆滞出库」）
   const toggleAutoFetch = useCallback(async (item: Item, on: boolean) => {
@@ -930,6 +940,16 @@ export default function ContinuousPage() {
                                   <button key={a.fileId} onClick={() => fetchAttachment(a.fileId)}
                                     className="inline-flex items-center gap-1 text-[10px] text-blue-600 bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded-lg transition-colors">
                                     <Download className="w-3 h-3" /> 附件{a.fileId}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            {Array.isArray(it.localAttachments) && it.localAttachments.length > 0 && (
+                              <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                                {it.localAttachments.map((u: string, i: number) => (
+                                  <button key={u} onClick={() => openLocalFile(u)} title={u.split('/').pop()}
+                                    className="w-10 h-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-50 hover:border-blue-300 transition-colors">
+                                    <img src={u} alt={`附件${i + 1}`} loading="lazy" className="w-full h-full object-cover" />
                                   </button>
                                 ))}
                               </div>

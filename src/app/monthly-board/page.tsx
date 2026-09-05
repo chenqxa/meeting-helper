@@ -619,7 +619,7 @@ function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
                                   >
                                     {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
                                   </button>
-                                  <p className="text-[13px] text-slate-400">{pr.cycleDate} 填报</p>
+                                  <p className="text-[13px] text-slate-400">自动取数 · 数据至 {(pr.cycleDate || '').slice(5).replace('-', '/')}</p>
                                 </div>
                               );
                             }

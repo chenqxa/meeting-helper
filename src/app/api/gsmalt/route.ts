@@ -126,6 +126,7 @@ export async function GET(request: NextRequest) {
         if (maxJd && maxJd > jd) newJd = maxJd;
       }
       return {
+        dt1Id: dt1Id || null, // OA uf_GSMALT_dt1.id（用于前端关联系统内 source_type='gsmalt' 的行动项）
         kpi: (r.kpi as string) || null,
         dept: (r.dept as string) || null,
         owner: (r.owner as string) || null,

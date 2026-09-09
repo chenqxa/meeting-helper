@@ -210,6 +210,7 @@ export async function GET(request: NextRequest) {
       let effectiveDate = meeting?.meetingDate || item.createdAt?.slice(0, 10) || '';
       return {
         id: item.id,
+        original_id: item.originalId || null, // OA dt1.id（gsmalt 来源用于关联 OA 主表行）
         description: item.description,
         owner: item.owner,
         ownerLoginId: item.ownerLoginId,

@@ -21,6 +21,7 @@ import { useBoardPermission, BoardDeniedPage } from '@/hooks/use-board-permissio
 // ── 数据结构（与 /api/actions 返回一致，仅取演示所需字段）──
 interface BoardItem {
   id: string;
+  original_id?: string | null; // OA dt1.id（gsmalt 来源时用于关联 /api/gsmalt 行）
   description: string;
   owner: string | null;
   dept: string | null;
@@ -29,6 +30,7 @@ interface BoardItem {
   due_date_type?: string | null;
   priority: string;
   status: string;
+  source_type?: string | null; // 'meeting' | 'batch' | 'gsmalt' | ...
   meeting_title?: string;
   meeting_date?: string;
   meeting_type?: string;
@@ -44,6 +46,7 @@ interface BoardItem {
 
 // ── 战略稽核（GSMALT）数据结构（与 /api/gsmalt 返回一致）──
 interface GsmaltItem {
+  dt1Id?: string | null; // OA uf_GSMALT_dt1.id（用于匹配系统内 source_type='gsmalt' 的行动项）
   kpi: string | null;
   dept: string | null;
   owner: string | null;
@@ -671,10 +674,16 @@ function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
 // ─────────────────────────────────────────────────────────────
 // ── 战略稽核（GSMALT）：X 项通报页 ──
 // ─────────────────────────────────────────────────────────────
-function GsmaltRow({ it, no }: { it: GsmaltItem; no: string }) {
+function GsmaltRow({ it, no, onClick }: { it: GsmaltItem; no: string; onClick?: (it: GsmaltItem) => void }) {
   const contentTitle = [it.kpi, it.xdjh].filter(Boolean).join('\n');
   return (
-    <tr className="[&>td]:border-b [&>td]:border-slate-100 hover:bg-slate-50/60 transition-colors">
+    <tr
+      onClick={onClick ? () => onClick(it) : undefined}
+      className={cn(
+        '[&>td]:border-b [&>td]:border-slate-100 transition-colors',
+        onClick ? 'cursor-pointer hover:bg-emerald-50/40' : 'hover:bg-slate-50/60'
+      )}
+    >
       <td className="text-center py-2.5 px-2"><span className="text-base font-semibold text-slate-300 tabular-nums">{no}</span></td>
       <td className="text-left py-2.5 px-2 text-[17px] font-medium text-slate-800 leading-snug" title={contentTitle}>
         {it.kpi && <span className="text-sm text-blue-500 font-medium mr-1">[{it.kpi}]</span>}
@@ -684,14 +693,22 @@ function GsmaltRow({ it, no }: { it: GsmaltItem; no: string }) {
       <td className="text-center py-2.5 px-2 text-base text-slate-700">{it.owner || '—'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-600 whitespace-nowrap">{formatDateCN(it.jd)}</td>
       <td className="text-center py-2.5 px-2 text-base whitespace-nowrap">
-        {it.newJd ? <span className="font-semibold text-blue-600">{formatDateCN(it.newJd)}</span> : <span className="text-slate-300">—</span>}
+        {onClick ? (
+          <span className="inline-flex items-center gap-0.5 font-medium text-emerald-600 whitespace-nowrap">
+            查看详情<ChevronRight className="w-3.5 h-3.5" />
+          </span>
+        ) : it.newJd ? (
+          <span className="font-semibold text-blue-600">{formatDateCN(it.newJd)}</span>
+        ) : (
+          <span className="text-slate-300">—</span>
+        )}
       </td>
     </tr>
   );
 }
 
-function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate }: {
-  items: GsmaltItem[]; all: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null; prevRate?: number | null;
+function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate, onDoneClick }: {
+  items: GsmaltItem[]; all: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null; prevRate?: number | null; onDoneClick?: (it: GsmaltItem) => void;
 }) {
   const blockedRows = items; // 打X项
   // 排除打0（待定）：不计入目标/完成/完成率（双重过滤兼容 Number 转换）
@@ -772,7 +789,7 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate }: {
               {doneRows.length === 0 ? (
                 <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
               ) : doneRows.map((it, i) => (
-                <GsmaltRow key={`v-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
+                <GsmaltRow key={`v-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} onClick={onDoneClick} />
               ))}
             </tbody>
           </table>
@@ -1042,7 +1059,7 @@ export default function MonthlyBoardPage() {
   const [count, setCount] = useState(0);
   const [monthOffset, setMonthOffset] = useState(0); // 0=默认数据月(上月)，1=再往前一月，-1=未来月
   const deckRef = useRef<HTMLDivElement>(null);
-  const [doneDetail, setDoneDetail] = useState<BoardItem | null>(null); // 点开「已完成项」详情
+  const [doneDetail, setDoneDetail] = useState<BoardItem | null>(null); // 点开「已完成项」详情（行动项 / GSMALT·V 共用）
   const [contDetail, setContDetail] = useState<{ progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null } | null>(null); // 点开持续项自动取数明细
 
   const load = useCallback(async () => {
@@ -1246,6 +1263,40 @@ export default function MonthlyBoardPage() {
   // 战略稽核打X项
   const gsmaltXItems = useMemo(() => gsmalt.filter(i => i.audit === 1), [gsmalt]);
 
+  // 助手填报的 GSMALT 行动项映射：OA dt1Id → 系统 BoardItem（用于 ✓ 已完成项详情弹窗）
+  const gsmaltItemMap = useMemo(() => {
+    const m = new Map<string, BoardItem>();
+    for (const it of items) {
+      if (it.source_type !== 'gsmalt') continue;
+      if (!it.original_id) continue;
+      m.set(String(it.original_id), it);
+    }
+    return m;
+  }, [items]);
+
+  // 点开 GSMALT ✓ 已完成项：按 dt1Id 找到助手填报的 BoardItem，复用同一个 ActionDoneDetailDialog
+  const handleGsmaltDoneClick = useCallback((g: GsmaltItem) => {
+    const matched = g.dt1Id ? gsmaltItemMap.get(String(g.dt1Id)) : undefined;
+    if (matched) {
+      setDoneDetail({
+        ...matched,
+        meeting_title: matched.meeting_title || `绩效面谈 · ${lastMonthLabel}`,
+      });
+    } else {
+      // 未匹配到系统行（如暂未同步进 hyzs_action_items）：弹空详情，避免 click 无响应
+      setDoneDetail({
+        id: `gsmalt-${g.dt1Id || ''}`,
+        description: g.xdjh || g.kpi || '—',
+        owner: g.owner,
+        dept: g.dept,
+        due_date: g.jd,
+        status: 'done',
+        source_type: 'gsmalt',
+        meeting_title: `绩效面谈 · ${lastMonthLabel}`,
+      } as BoardItem);
+    }
+  }, [gsmaltItemMap, lastMonthLabel]);
+
   // 底部统计：汇报月N → 数据月 N-1 → 对比月 N-2
   // 数据月无完整数据时回退模拟数据（待数据连续后自动替换）
   const monthStats = useMemo<WeekStats>(() => {
@@ -1291,11 +1342,11 @@ export default function MonthlyBoardPage() {
   // 幻灯片清单 —— 后续异构页在此追加
   const slides = useMemo(() => [
     { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastMonthItems} doneItems={lastMonthDoneItems} allItems={items} monthLabel={lastMonthLabel} stats={monthStats} onDoneClick={setDoneDetail} /> },
-    { id: 'gsmalt-x', label: '绩效面谈·未达成KPI', node: <GsmaltXSlide items={gsmaltXItems} all={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} prevRate={gsmaltPrevRate} /> },
+    { id: 'gsmalt-x', label: '绩效面谈·未达成KPI', node: <GsmaltXSlide items={gsmaltXItems} all={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} prevRate={gsmaltPrevRate} onDoneClick={handleGsmaltDoneClick} /> },
     { id: 'continuous-pending', label: '持续项汇报', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressMap} onShowDetail={setContDetail} /> },
     { id: 'gsmalt-stats', label: '绩效面谈·KPI汇总', node: <GsmaltStatsSlide items={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} /> },
     { id: 'stats', label: '总览', node: <StatsSlide items={monthlyItems} contItems={monthlyContItems} progressMap={progressMap} /> },
-  ], [items, monthlyItems, monthlyContItems, lastMonthItems, lastMonthDoneItems, lastMonthLabel, monthStats, continuousPendingItems, progressMap, gsmalt, gsmaltXItems, gsmaltLoading, gsmaltError]);
+  ], [items, monthlyItems, monthlyContItems, lastMonthItems, lastMonthDoneItems, lastMonthLabel, monthStats, continuousPendingItems, progressMap, gsmalt, gsmaltXItems, gsmaltLoading, gsmaltError, handleGsmaltDoneClick]);
 
   const goPrev = () => api?.scrollPrev();
   const goNext = () => api?.scrollNext();

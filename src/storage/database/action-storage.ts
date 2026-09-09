@@ -33,6 +33,8 @@ export interface ActionItem {
   cycleDate?: string | null;        // 周期任务：归属周期日期（如持续项每周任务的 YYYY-MM-DD）
   autoFetch?: boolean;              // 持续项「自动取数」标记：开启后不再催人填报，由系统每周定时自动取数（取不到则不写）
   autoFetchSource?: string | null;  // 自动取数绑定的「取数源」key（见 lib/auto-fetch-sources-meta）
+  autoXAt?: string | null;          // 系统自动打X时间戳（到期未处理自动打X，防重复）
+  dueReminderAt?: string | null;    // 到期前预警已推送时间戳（防重复提醒）
 
   confirmedBy?: string | null;
   confirmedAt?: string | null;
@@ -228,6 +230,14 @@ export async function ensureTable(p: sql.ConnectionPool) {
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_fetch_source')
     ALTER TABLE hyzs_action_items ADD auto_fetch_source NVARCHAR(64) NULL
   `);
+  await p.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_x_at')
+    ALTER TABLE hyzs_action_items ADD auto_x_at NVARCHAR(30) NULL
+  `);
+  await p.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'due_reminder_at')
+    ALTER TABLE hyzs_action_items ADD due_reminder_at NVARCHAR(30) NULL
+  `);
 
   // backfill existing rows
   await p.request().query(`
@@ -380,6 +390,8 @@ function rowToActionItem(row: any): ActionItem {
     cycleDate: row.cycle_date || null,
     autoFetch: !!row.auto_fetch,
     autoFetchSource: row.auto_fetch_source || null,
+    autoXAt: row.auto_x_at || null,
+    dueReminderAt: row.due_reminder_at || null,
     confirmedBy: row.confirmed_by || null,
     confirmedAt: row.confirmed_at || null,
     completedBy: row.completed_by || null,
@@ -595,6 +607,8 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
     .input('reassigned_to', sql.NVarChar, updated.reassignedTo || null)
     .input('proposer_dept', sql.NVarChar, updated.proposerDept || null)
     .input('cycle_date', sql.NVarChar, updated.cycleDate || null)
+    .input('auto_x_at', sql.NVarChar, updated.autoXAt || null)
+    .input('due_reminder_at', sql.NVarChar, updated.dueReminderAt || null)
     .input('updated_at', sql.NVarChar, now)
     .query(`UPDATE hyzs_action_items SET
       description=@description, project_id=@project_id,
@@ -610,7 +624,7 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
       oa_result=@oa_result, oa_result_at=@oa_result_at, oa_score=@oa_score,
       oa_auto_detected=@oa_auto_detected, oa_attachments=@oa_attachments,
       reassigned_from=@reassigned_from, reassigned_to=@reassigned_to, proposer_dept=@proposer_dept,
-      cycle_date=@cycle_date, updated_at=@updated_at
+      cycle_date=@cycle_date, auto_x_at=@auto_x_at, due_reminder_at=@due_reminder_at, updated_at=@updated_at
       WHERE id=@id`);
 
   invalidateListCache();

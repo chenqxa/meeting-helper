@@ -69,6 +69,7 @@ export default function MyTasksPage() {
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
   const [resultNone, setResultNone] = useState(false); // 持续项「本期无进展/无完成情况」：true=无（免填说明与附件）
+  const [tbdDueDate, setTbdDueDate] = useState(''); // tbd（自动转派）任务的节点日期填写
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -138,6 +139,7 @@ export default function MyTasksPage() {
     setResultImages([]);
     // 上期填「无」的记录（oa_result 规范为"无"）重开时默认仍选「无」，无需再手点
     setResultNone(task.due_date_type === 'continuous' && getDisplayOaResult(task.oa_result) === '无');
+    setTbdDueDate('');
   };
 
   const filtered = tasks.filter(t => {
@@ -379,6 +381,22 @@ export default function MyTasksPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 space-y-5 pb-2">
+              {/* tbd（自动转派）任务：填写节点日期 */}
+              {resultItem.due_date_type === 'tbd' && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-2.5">
+                    节点日期 <span className="text-red-400">*</span>
+                    <span className="text-slate-300 font-normal ml-1">（此任务由超期自动转派生成，请填写计划完成日期）</span>
+                  </div>
+                  <input
+                    type="date"
+                    value={tbdDueDate}
+                    onChange={e => setTbdDueDate(e.target.value)}
+                    className="w-full h-9 text-sm border border-slate-200 rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-300"
+                  />
+                </div>
+              )}
+
               {resultItem.due_date_type !== 'continuous' && (
                 <div>
                   <div className="text-xs font-medium text-slate-500 mb-2.5">处理结果</div>
@@ -418,7 +436,7 @@ export default function MyTasksPage() {
               )}
 
               {/* 持续项：先选本期是否有完成情况；无 → 免填说明与附件 */}
-              {resultItem.due_date_type === 'continuous' && (
+              {(resultItem as any).due_date_type === 'continuous' && (
                 <div>
                   <div className="text-xs font-medium text-slate-500 mb-2.5">本期是否有完成情况？</div>
                   <div className="grid grid-cols-2 gap-2">
@@ -461,7 +479,11 @@ export default function MyTasksPage() {
 
               <div>
                 <div className="text-xs font-medium text-slate-500 mb-2">
-                  图片附件 <span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（截图、证明材料等，至少上传 1 张）</span>
+                  图片附件 {resultItem.due_date_type === 'continuous'
+                    ? <span className="text-slate-300 font-normal">（选"有进展"时必填至少1张）</span>
+                    : resultForm.status === 'done'
+                      ? <><span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（完成证明，至少上传 1 张）</span></>
+                      : <span className="text-slate-300 font-normal">（未完成时选填）</span>}
                 </div>
                 <div
                   className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-pointer group"
@@ -511,7 +533,13 @@ export default function MyTasksPage() {
               <button
                 onClick={async () => {
                   const isCont = resultItem.due_date_type === 'continuous';
+                  const isTbd = resultItem.due_date_type === 'tbd';
                   const isNone = isCont && resultNone; // 持续项选「无进展」：免填说明与附件
+                  // tbd（自动转派）任务必须填节点日期
+                  if (isTbd && !tbdDueDate) {
+                    alert('请填写节点日期');
+                    return;
+                  }
                   // 未完成必须填下次完成时间
                   if (!isCont && resultForm.status === 'blocked' && !nextDueDate) {
                     alert('请选择下次完成时间');
@@ -523,8 +551,8 @@ export default function MyTasksPage() {
                       alert(isCont ? '请填写进展说明' : '请填写处理说明');
                       return;
                     }
-                    // 图片附件必填（至少 1 张）——持续项选「有进展」同样需要证明截图
-                    if (resultImages.length === 0) {
+                    // 图片附件：已完成必填（至少1张证明）；未完成选填（说明原因即可）
+                    if (resultForm.status === 'done' && resultImages.length === 0) {
                       alert('请至少上传 1 张图片附件（截图、证明材料等）');
                       return;
                     }
@@ -559,11 +587,17 @@ export default function MyTasksPage() {
                               next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined,
                             }),
                         oa_auto_detected: false,
+                        // tbd 任务：责任人填的节点日期（后台对 tbd 自报放行）
+                        ...(isTbd && tbdDueDate ? { due_date: tbdDueDate, due_date_type: 'date' } : {}),
                         // 「无进展」不保留历史附件，避免误导为有内容
                         oa_attachments: isNone ? [] : (imageUrls.length > 0 ? imageUrls : (resultItem.oa_attachments || [])),
                       }),
                     });
                     if (res.ok) { setResultItem(null); load(); }
+                    else {
+                      const j = await res.json().catch(() => ({}));
+                      alert((j as any).error || `提交失败（${res.status}）`);
+                    }
                   } finally { setResultSubmitting(false); }
                 }}
                 disabled={resultSubmitting}

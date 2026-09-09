@@ -16,6 +16,7 @@ import SlideFrame from '@/components/slide-frame';
 import BoardBigTextToggle from '@/components/board-big-text-toggle';
 import ActionDoneDetailDialog from '@/components/board/action-done-detail-dialog';
 import ContinuousDetailDialog from '@/components/board/continuous-detail-dialog';
+import { useBoardPermission, BoardDeniedPage } from '@/hooks/use-board-permission';
 
 // ── 数据结构（与 /api/actions 返回一致，仅取演示所需字段）──
 interface BoardItem {
@@ -171,7 +172,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, cycleOffset = 0 }
     <SlideShell
       eyebrow="总览"
       title="产销会待办总览"
-      subtitle={`数据范围：行动项台账全量 · 共 ${items.length} 条记录`}
+      subtitle={`数据范围：行动项台账全量 · 共 ${items.filter(i => !isExcluded(i)).length} 条记录（打0项不计入）`}
       accent="from-blue-500 to-indigo-500"
     >
       <div className="flex-1 grid grid-cols-12 gap-5 min-h-0">
@@ -718,6 +719,7 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 // 滑动演示主体
 // ─────────────────────────────────────────────────────────────
 export default function MonthlyBoardPage() {
+  const { denied: permDenied } = useBoardPermission('production');
   const [items, setItems] = useState<BoardItem[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; dataMonth?: string | null; detail?: any[] | null }>>({});
   const [loading, setLoading] = useState(true);
@@ -960,6 +962,10 @@ export default function MonthlyBoardPage() {
   const goPrev = () => api?.scrollPrev();
   const goNext = () => api?.scrollNext();
 
+  if (permDenied) {
+    return <DashboardLayout><BoardDeniedPage boardName="产销会看板" /></DashboardLayout>;
+  }
+
   return (
     <DashboardLayout>
       <div
@@ -1066,12 +1072,11 @@ export default function MonthlyBoardPage() {
             ))}
           </div>
         </div>
-      </div>
 
-      {/* 已完成项详情弹窗（浮于投屏/沉浸层之上） */}
-      <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
-      {/* 持续项自动取数明细弹窗 */}
-      <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
+        {/* 详情弹窗（在 deckRef 内，沉浸/全屏模式可见） */}
+        <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
+        <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
+      </div>
     </DashboardLayout>
   );
 }

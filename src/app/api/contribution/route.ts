@@ -85,6 +85,8 @@ export async function GET(request: Request) {
     for (const row of rows) {
       const owner = String(row.owner || '').trim();
       if (!owner || GROUP_OWNERS.has(owner)) continue; // 排除群体/部门责任人
+      // 打0（待定）不归属任何板块：不计接收数/完成数/超期数，与看板口径一致
+      if (row.oa_score === 0) continue;
       const pk = periodKeyOf(String(row.due_date));
       if (!agg[owner]) { agg[owner] = {}; personInfo[owner] = { dept: row.dept || '', proposerCnt: proposerCntMap[owner] || 0 }; }
       if (!agg[owner][pk.key]) agg[owner][pk.key] = { recv: 0, done: 0, x: 0, overdue: 0, tbd: 0 };

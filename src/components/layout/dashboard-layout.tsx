@@ -254,9 +254,9 @@ export default function DashboardLayout({ children }: LayoutProps) {
         { icon: FileText, label: '会议中心', href: '/meetings', roles: ['admin', 'manager', 'secretary', 'employee'] },
         // 项目协同暂时隐藏，所有人不可见；需要时取消下一行注释即可
         // { icon: Building2, label: '项目协同', href: '/projects', roles: ['admin', 'manager', 'secretary'] },
-        { icon: Presentation, label: '周例会看板', href: '/weekly-board', perm: 'canViewBoard' },
-        { icon: Presentation, label: '月度看板', href: '/monthly-board', perm: 'canViewBoard' },
-        { icon: Presentation, label: '产销会看板', href: '/production-board', perm: 'canViewBoard' },
+      { icon: Presentation, label: '周例会看板', href: '/weekly-board', perm: 'canViewWeeklyBoard' },
+      { icon: Presentation, label: '月度看板', href: '/monthly-board', perm: 'canViewMonthlyBoard' },
+      { icon: Presentation, label: '产销会看板', href: '/production-board', perm: 'canViewProductionBoard' },
       ]
     },
     {

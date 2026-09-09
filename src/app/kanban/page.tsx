@@ -498,6 +498,9 @@ export default function KanbanPage() {
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
   const [resultNone, setResultNone] = useState(false); // 持续项「本期无进展/无完成情况」：true=无（免填说明与附件）
+  const [tbdDueDate, setTbdDueDate] = useState(''); // tbd（自动转派）任务的节点日期填写
+  const [tbdItem, setTbdItem] = useState<KanbanCard | null>(null); // tbd 轻量弹窗（只填日期，不弹汇报）
+  const [tbdSubmitting, setTbdSubmitting] = useState(false);
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [showIndicators, setShowIndicators] = useState(false);
   const [showAiInsight, setShowAiInsight] = useState(false);
@@ -677,6 +680,8 @@ export default function KanbanPage() {
   const [fromContinuousPush, setFromContinuousPush] = useState(false);
   // 推送批次精确过滤：?pushId=xx → 只显示该批次推送的持续项（不同类型/批次不混）
   const [pushItemIds, setPushItemIds] = useState<Set<string> | null>(null);
+  // 自动打X/预警卡片入口：?taskIds=id1,id2 → 只显示这几条待办
+  const [focusTaskIds, setFocusTaskIds] = useState<Set<string> | null>(null);
   useEffect(() => {
     const mid = searchParams.get('meetingId');
     if (mid) setFocusMeetingId(mid);
@@ -696,11 +701,23 @@ export default function KanbanPage() {
         })
         .catch(() => {});
     }
+    // 自动打X/预警：直接传任务 ID 列表
+    const tids = searchParams.get('taskIds');
+    if (tids) {
+      const ids = tids.split(',').map(s => s.trim()).filter(Boolean);
+      if (ids.length > 0) setFocusTaskIds(new Set(ids));
+    }
   }, [searchParams]);
 
   useEffect(() => { loadActions(); loadOrgEmployees(); }, [loadActions, loadOrgEmployees]);
 
   const openResult = (card: KanbanCard) => {
+    // tbd（自动转派）任务：弹轻量日期弹窗，先填节点再跟踪；不弹汇报
+    if (card.due_date_type === 'tbd') {
+      setTbdItem(card);
+      setTbdDueDate('');
+      return;
+    }
     setResultItem(card);
     // 预填过滤：导入元数据（{"y":..,"w":..,"d":..}）不是真实汇报，不带入输入框
     setResultForm({ text: getDisplayOaResult((card as any).oa_result), status: card.due_date_type === 'continuous' ? 'in_progress' : card.status === 'done' ? 'done' : 'blocked' });
@@ -708,6 +725,7 @@ export default function KanbanPage() {
     setResultImages([]);
     // 上期填「无」的记录（oa_result 规范为"无"）重开时默认仍选「无」，无需再手点
     setResultNone(card.due_date_type === 'continuous' && getDisplayOaResult((card as any).oa_result) === '无');
+    setTbdDueDate('');
   };
 
   // 汇报弹窗打开时：document 级粘贴监听，任意位置 Ctrl+V 截图都能捕获
@@ -745,9 +763,13 @@ export default function KanbanPage() {
   }, [today]);
 
   const filteredCards = cards.filter(c => {
+    // 打0（待定）项不出现在待办中心：与看板/贡献榜口径一致
+    if ((c as any).oa_score === 0) return false;
     if (searchText && !c.description.toLowerCase().includes(searchText.toLowerCase()) && !c.owner?.toLowerCase().includes(searchText.toLowerCase())) return false;
     // 推送批次精确过滤：只显示该次推送的持续项
     if (pushItemIds && !pushItemIds.has(c.id)) return false;
+    // 自动打X/预警卡片：只显示卡片指定的任务
+    if (focusTaskIds && !focusTaskIds.has(c.id)) return false;
     // 企微卡片聚焦模式：只显示该会议的待办（任何视图）
     if (focusMeetingId && c.meeting_id !== focusMeetingId) return false;
     // 持续项：不在填报周期或本周期已填 → 不进待办（历史保留在填报统计）
@@ -1344,15 +1366,17 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
 
           <div className="bg-white px-4 py-3">
             {/* 企微卡片聚焦模式提示条 */}
-            {(focusMeetingId || pushItemIds) && (
+            {(focusMeetingId || pushItemIds || focusTaskIds) && (
               <div className="mb-2 px-4 py-2 bg-blue-50 border border-blue-100 rounded-xl flex items-center justify-between gap-3">
                 <span className="text-xs text-blue-700 truncate">
-                  {pushItemIds
+                  {focusTaskIds
+                    ? `🎯 本次提醒的行动项（${filteredCards.length}条）`
+                    : pushItemIds
                     ? `🔄 本期推送的持续项（${filteredCards.length}条）`
                     : `📋 正在查看该会议的行动项（${filteredCards.length}条）`}
                 </span>
                 <button
-                  onClick={() => { setFocusMeetingId(null); setPushItemIds(null); }}
+                  onClick={() => { setFocusMeetingId(null); setPushItemIds(null); setFocusTaskIds(null); }}
                   className="text-xs text-blue-600 hover:text-blue-800 font-medium whitespace-nowrap"
                 >查看全部任务</button>
               </div>
@@ -1753,7 +1777,7 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                               }`}
                             >
                               <Pencil className="h-3 w-3" />
-                              {col.key === 'done' ? '查看 / 修改汇报' : '汇报进展'}
+                              {card.due_date_type === 'tbd' ? '📅 填写节点' : col.key === 'done' ? '查看 / 修改汇报' : '汇报进展'}
                             </button>
                           </div>
                         </div>
@@ -2156,7 +2180,12 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                 />
               </div>
               <div>
-                <div className="text-xs font-medium text-slate-500 mb-2">图片附件 <span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（截图、证明材料等，至少上传 1 张）</span></div>
+                <div className="text-xs font-medium text-slate-500 mb-2">图片附件 {resultItem.due_date_type === 'continuous'
+                  ? <span className="text-slate-300 font-normal">（选"有进展"时必填至少1张）</span>
+                  : resultForm.status === 'done'
+                    ? <><span className="text-red-400">*</span> <span className="text-slate-300 font-normal">（完成证明，至少上传 1 张）</span></>
+                    : <span className="text-slate-300 font-normal">（未完成时选填）</span>}
+                </div>
                 <div className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-pointer group"
                   onClick={() => document.getElementById('kanban-img-upload')?.click()}
                   onDragOver={e => e.preventDefault()}
@@ -2191,7 +2220,13 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
               <button
                 onClick={async () => {
                   const isCont = resultItem.due_date_type === 'continuous';
+                  const isTbd = resultItem.due_date_type === 'tbd';
                   const isNone = isCont && resultNone; // 持续项选「无进展」：免填说明与附件
+                  // tbd（自动转派）任务必须填节点日期
+                  if (isTbd && !tbdDueDate) {
+                    alert('请填写节点日期');
+                    return;
+                  }
                   // 未完成必须填下次完成时间
                   if (!isCont && resultForm.status === 'blocked' && !nextDueDate) {
                     alert('请选择下次完成时间');
@@ -2203,8 +2238,8 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                       alert(isCont ? '请填写进展说明' : '请填写处理说明');
                       return;
                     }
-                    // 图片附件必填（至少 1 张）——持续项选「有进展」同样需要证明截图
-                    if (resultImages.length === 0) {
+                    // 图片附件：已完成必填（至少1张证明）；未完成选填
+                    if (resultForm.status === 'done' && resultImages.length === 0) {
                       alert('请至少上传 1 张图片附件（截图、证明材料等）');
                       return;
                     }
@@ -2219,7 +2254,7 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                         if (r.success) imageUrls.push(r.url);
                       }
                     }
-                    await fetch(`/api/actions/${resultItem.id}`, {
+                    const res = await fetch(`/api/actions/${resultItem.id}`, {
                       method: 'PUT', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
                         // 持续项「无进展」：内容统一为"无"，后台据此打 is_none 标记（不计有进展统计）
@@ -2232,11 +2267,17 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                           : { oa_score: resultForm.status === 'done' ? 1 : resultForm.status === 'blocked' ? -1 : undefined, status: resultForm.status,
                               next_due_date: resultForm.status === 'blocked' ? nextDueDate : undefined }),
                         oa_auto_detected: false,
+                        // tbd 任务：责任人填的节点日期（后台对 tbd 自报放行）
+                        ...(isTbd && tbdDueDate ? { due_date: tbdDueDate, due_date_type: 'date' } : {}),
                         // 「无进展」不保留历史附件，避免误导为有内容
                         oa_attachments: isNone ? [] : (imageUrls.length > 0 ? imageUrls : ((resultItem as any).oa_attachments || [])),
                       }),
                     });
-                    setResultItem(null); loadActions();
+                    if (res.ok) { setResultItem(null); loadActions(); }
+                    else {
+                      const j = await res.json().catch(() => ({}));
+                      alert((j as any).error || `提交失败（${res.status}）`);
+                    }
                   } finally { setResultSubmitting(false); }
                 }}
                 disabled={resultSubmitting}
@@ -2249,6 +2290,57 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                 {resultSubmitting ? <span className="flex items-center justify-center gap-2"><RefreshCw className="w-3.5 h-3.5 animate-spin" />提交中...</span>
                   : resultItem.due_date_type === 'continuous' ? (resultNone ? '提交无进展' : '更新进展')
                   : resultForm.status === 'done' ? '标记完成' : resultForm.status === 'blocked' ? '标记未完成' : '更新进展'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── tbd 轻量弹窗：只填节点日期（自动转派任务，先定节点再跟踪） ── */}
+      {tbdItem && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) setTbdItem(null); }}>
+          <div className="bg-white w-full sm:w-[440px] sm:rounded-2xl rounded-t-2xl shadow-2xl flex flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-slate-100">
+              <div>
+                <h2 className="text-base font-semibold text-slate-800">📅 请填写节点日期</h2>
+                <p className="text-xs text-slate-400 mt-0.5">此任务由超期自动转派生成，填写后按此节点跟踪并自动提醒</p>
+              </div>
+              <button onClick={() => setTbdItem(null)} className="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-100">
+                <div className="text-xs text-slate-700 leading-relaxed">{tbdItem.description}</div>
+                <div className="text-[10px] text-slate-400 mt-1.5">责任人：{tbdItem.owner || '—'} · 转派自动生成</div>
+              </div>
+              <div>
+                <div className="text-xs font-medium text-slate-500 mb-2">计划完成日期 <span className="text-red-400">*</span></div>
+                <input type="date" value={tbdDueDate} onChange={e => setTbdDueDate(e.target.value)} autoFocus
+                  className="w-full h-10 text-sm border border-slate-200 rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300" />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+              <button onClick={() => setTbdItem(null)}
+                className="px-5 h-10 border border-slate-200 text-slate-500 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors">取消</button>
+              <button
+                onClick={async () => {
+                  if (!tbdDueDate) { alert('请选择日期'); return; }
+                  setTbdSubmitting(true);
+                  try {
+                    const res = await fetch(`/api/actions/${tbdItem.id}`, {
+                      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ due_date: tbdDueDate, due_date_type: 'date' }),
+                    });
+                    if (res.ok) { setTbdItem(null); loadActions(); }
+                    else { const j = await res.json().catch(() => ({})); alert((j as any).error || '保存失败'); }
+                  } finally { setTbdSubmitting(false); }
+                }}
+                disabled={tbdSubmitting}
+                className="flex-1 h-10 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold disabled:opacity-60 transition-colors">
+                {tbdSubmitting ? '保存中...' : '✓ 确认节点'}
               </button>
             </div>
           </div>

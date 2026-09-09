@@ -16,6 +16,7 @@ import SlideFrame from '@/components/slide-frame';
 import BoardBigTextToggle from '@/components/board-big-text-toggle';
 import ActionDoneDetailDialog from '@/components/board/action-done-detail-dialog';
 import ContinuousDetailDialog from '@/components/board/continuous-detail-dialog';
+import { useBoardPermission, BoardDeniedPage } from '@/hooks/use-board-permission';
 
 // ── 数据结构（与 /api/actions 返回一致，仅取演示所需字段）──
 interface BoardItem {
@@ -118,7 +119,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
     // 打X(oa_score=-1) 的项不算待办，单独归为「未完成项」
     const done = items.filter(i => isDone(i));
     const xItems = items.filter(i => effectiveScore(i) === -1);           // 未完成项（打X，与台账操作栏一致）
-    const pending = items.filter(i => !isDone(i) && effectiveScore(i) !== -1); // 待办（排除打X）
+    const pending = items.filter(i => !isDone(i) && effectiveScore(i) !== -1 && effectiveScore(i) !== 0); // 待办（排除打X/打0）
     const { start, end } = monthRange();
     const dueThisMonth = pending.filter(i =>
       i.due_date && (i.due_date_type || 'date') === 'date' &&
@@ -176,7 +177,7 @@ function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' 
     <SlideShell
       eyebrow="总览"
       title="月度例会待办总览"
-      subtitle={`数据范围：行动项台账全量 · 共 ${items.length} 条记录`}
+      subtitle={`数据范围：行动项台账全量 · 共 ${items.filter(i => effectiveScore(i) !== 0).length} 条记录（打0项不计入）`}
       accent="from-blue-500 to-indigo-500"
     >
       <div className="flex-1 grid grid-cols-12 gap-5 min-h-0">
@@ -490,7 +491,9 @@ function OverdueNoticeSlide({ items, doneItems, allItems, monthLabel, stats, onD
 }
 
 // 底部指标块
-function Metric({ label, value, unit, tone }: { label: string; value: string; unit: string; tone: 'slate' | 'emerald' | 'blue' | 'red' }) {
+function Metric({ label, value, unit, tone, sub }: {
+  label: string; value: string; unit: string; tone: 'slate' | 'emerald' | 'blue' | 'red'; sub?: string;
+}) {
   const toneMap = {
     slate: 'text-slate-800',
     emerald: 'text-emerald-600',
@@ -499,9 +502,16 @@ function Metric({ label, value, unit, tone }: { label: string; value: string; un
   } as const;
   return (
     <div className="flex items-baseline gap-1.5 flex-shrink-0">
-      <span className="text-base text-slate-400">{label}</span>
-      <span className={cn('text-2xl font-black tabular-nums leading-none', toneMap[tone])}>{value}</span>
-      <span className="text-base text-slate-400">{unit}</span>
+      <div className="flex flex-col gap-0">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-base text-slate-400">{label}</span>
+          <span className={cn('text-2xl font-black tabular-nums leading-none', toneMap[tone])}>{value}</span>
+          <span className="text-base text-slate-400">{unit}</span>
+        </div>
+        {sub && (
+          <span className="text-xs text-slate-400 tabular-nums leading-tight">{sub}</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -662,16 +672,16 @@ function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
 // ── 战略稽核（GSMALT）：X 项通报页 ──
 // ─────────────────────────────────────────────────────────────
 function GsmaltRow({ it, no }: { it: GsmaltItem; no: string }) {
+  const contentTitle = [it.kpi, it.xdjh].filter(Boolean).join('\n');
   return (
     <tr className="[&>td]:border-b [&>td]:border-slate-100 hover:bg-slate-50/60 transition-colors">
       <td className="text-center py-2.5 px-2"><span className="text-base font-semibold text-slate-300 tabular-nums">{no}</span></td>
-      <td className="text-left py-2.5 px-2 text-base font-medium text-slate-800 leading-snug max-w-[180px]"><p className="line-clamp-2">{it.kpi || '—'}</p></td>
+      <td className="text-left py-2.5 px-2 text-[17px] font-medium text-slate-800 leading-snug" title={contentTitle}>
+        {it.kpi && <span className="text-sm text-blue-500 font-medium mr-1">[{it.kpi}]</span>}
+        {it.xdjh || '—'}
+      </td>
       <td className="text-center py-2.5 px-2 text-base text-slate-500">{it.dept || '—'}</td>
-      <td className="text-center py-2.5 px-2 text-base text-slate-700 whitespace-nowrap">{it.owner || '—'}</td>
-      <td className="py-2.5 px-2 text-base text-slate-600 leading-snug max-w-[260px]"><p className="line-clamp-2" title={it.yyfx || ''}>{it.yyfx || '—'}</p></td>
-      <td className="py-2.5 px-2 text-base text-slate-600 leading-snug max-w-[260px]"><p className="line-clamp-2" title={it.xdjh || ''}>{it.xdjh || '—'}</p></td>
-      <td className="text-center py-2.5 px-2 text-base text-slate-600">{it.cl || '—'}</td>
-      <td className="text-center py-2.5 px-2 text-base text-slate-600">{it.hl || '—'}</td>
+      <td className="text-center py-2.5 px-2 text-base text-slate-700">{it.owner || '—'}</td>
       <td className="text-center py-2.5 px-2 text-base text-slate-600 whitespace-nowrap">{formatDateCN(it.jd)}</td>
       <td className="text-center py-2.5 px-2 text-base whitespace-nowrap">
         {it.newJd ? <span className="font-semibold text-blue-600">{formatDateCN(it.newJd)}</span> : <span className="text-slate-300">—</span>}
@@ -680,14 +690,17 @@ function GsmaltRow({ it, no }: { it: GsmaltItem; no: string }) {
   );
 }
 
-function GsmaltXSlide({ items, all, monthLabel, loading, error }: {
-  items: GsmaltItem[]; all: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null;
+function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate }: {
+  items: GsmaltItem[]; all: GsmaltItem[]; monthLabel: string; loading?: boolean; error?: string | null; prevRate?: number | null;
 }) {
   const blockedRows = items; // 打X项
-  const pendingRows = all.filter(i => i.audit === null); // 未处理项（未稽核）
-  const vCount = all.filter(i => i.audit === 0).length;
-  const xCount = all.filter(i => i.audit === 1).length;
-  const zCount = all.filter(i => i.audit === 2).length;
+  // 排除打0（待定）：不计入目标/完成/完成率（双重过滤兼容 Number 转换）
+  const effective = all.filter(i => i.audit !== 2 && Number(i.audit) !== 2);
+  const pendingRows = effective.filter(i => i.audit === null || i.audit === undefined); // 未处理项（未稽核）
+  const doneRows = effective.filter(i => i.audit === 0); // V 达标（已完成）
+  const vCount = doneRows.length;
+  const xCount = effective.filter(i => i.audit === 1).length;
+  const zCount = all.filter(i => i.audit === 2 || Number(i.audit) === 2).length; // 打0数（仅展示用）
   return (
     <div className="relative w-full h-full bg-white rounded-xl shadow-2xl ring-1 ring-slate-200/60 overflow-hidden flex flex-col">
       {/* 标题栏：深红渐变 + 警示竖条 */}
@@ -698,7 +711,7 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error }: {
         </div>
         <div className="flex-1 min-w-0">
           <h2 className="text-[32px] font-black text-white tracking-tight leading-tight">绩效面谈 · 未达成 KPI 通报</h2>
-          <p className="text-base text-red-200/70 mt-1 tracking-widest">PERFORMANCE REVIEW · {monthLabel} 绩效面谈材料（未完成 + 未处理）</p>
+          <p className="text-base text-red-200/70 mt-1 tracking-widest">PERFORMANCE REVIEW · {monthLabel} 绩效面谈材料（未完成 + 未处理 + 已完成）</p>
         </div>
         <div className="text-right flex-shrink-0 flex items-center gap-5">
           <div>
@@ -708,6 +721,10 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error }: {
           <div>
             <div className="text-base text-amber-200/60 tracking-wide">未处理</div>
             <div className="text-3xl font-black text-white tabular-nums leading-tight">{pendingRows.length}<span className="text-base font-normal text-white/60 ml-1">项</span></div>
+          </div>
+          <div>
+            <div className="text-base text-emerald-200/70 tracking-wide">已完成</div>
+            <div className="text-3xl font-black text-white tabular-nums leading-tight">{doneRows.length}<span className="text-base font-normal text-white/60 ml-1">项</span></div>
           </div>
         </div>
       </div>
@@ -721,60 +738,81 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error }: {
             <AlertTriangle className="w-10 h-10 text-amber-300" />
             <span className="text-base">{error}</span>
           </div>
-        ) : blockedRows.length + pendingRows.length === 0 ? (
+        ) : blockedRows.length + pendingRows.length + doneRows.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2">
             <CheckCircle2 className="w-10 h-10 text-emerald-400" />
-            <span className="text-base">{monthLabel} 绩效面谈无未达成项，全部达成 🎉</span>
+            <span className="text-base">{monthLabel} 绩效面谈无数据</span>
           </div>
         ) : (
           <table className="w-full border-separate border-spacing-0">
             <thead>
               <tr className="text-base text-slate-500">
                 <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-10 bg-slate-50 border-b border-slate-200">No.</th>
-                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">KPI</th>
+                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">项目内容</th>
                 <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">责任部门</th>
                 <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">责任人</th>
-                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">原因分析</th>
-                <th className="sticky top-0 z-10 text-left font-semibold py-2 px-2 bg-slate-50 border-b border-slate-200">行动计划</th>
-                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">策略</th>
-                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-16 bg-slate-50 border-b border-slate-200">衡量</th>
-                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">原节点</th>
-                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-20 bg-slate-50 border-b border-slate-200">新节点</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">原节点</th>
+                <th className="sticky top-0 z-10 text-center font-semibold py-2 px-2 w-24 bg-slate-50 border-b border-slate-200">新节点</th>
               </tr>
             </thead>
             <tbody>
               <SectionRow title="✕ 打X项" count={blockedRows.length} tone="red" />
               {blockedRows.length === 0 ? (
-                <tr><td colSpan={10} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+                <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
               ) : blockedRows.map((it, i) => (
                 <GsmaltRow key={`x-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
               ))}
               <SectionRow title="未处理项（未稽核）" count={pendingRows.length} tone="amber" />
               {pendingRows.length === 0 ? (
-                <tr><td colSpan={10} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+                <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
               ) : pendingRows.map((it, i) => (
                 <GsmaltRow key={`p-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
+              ))}
+              <SectionRow title="✓ 已完成项（V 达标）" count={doneRows.length} tone="emerald" />
+              {doneRows.length === 0 ? (
+                <tr><td colSpan={6} className="text-center py-2 text-slate-300 text-base">无</td></tr>
+              ) : doneRows.map((it, i) => (
+                <GsmaltRow key={`v-${it.kpi}-${it.owner}-${i}`} it={it} no={String(i + 1).padStart(2, '0')} />
               ))}
             </tbody>
           </table>
         )}
       </div>
 
-      {/* 底部统计栏 */}
+      {/* 底部统计栏：仿第一页格式（含较上月）+ 明确圈0排除口径 */}
       <div className="flex-shrink-0 border-t border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100/60 px-7 py-3">
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <span className="text-base font-bold text-slate-500 tracking-wide">{monthLabel} 绩效面谈 KPI</span>
+            <span className="text-base font-bold text-slate-500 tracking-wide">{monthLabel} 绩效面谈</span>
           </div>
           <div className="w-px h-7 bg-slate-300/70 flex-shrink-0" />
-          <Metric label="总项数" value={`${all.length}`} unit="项" tone="slate" />
-          <Metric label="V 达标" value={`${vCount}`} unit="项" tone="emerald" />
-          <Metric label="X 未完成" value={`${xCount}`} unit="项" tone="red" />
-          <Metric label="0 待定" value={`${zCount}`} unit="项" tone="blue" />
-          <Metric label="未稽核" value={`${pendingRows.length}`} unit="项" tone="slate" />
+          <Metric
+            label="目标（已排除圈0）"
+            value={`${effective.length}`}
+            unit="项"
+            tone="slate"
+            sub={zCount > 0 ? `共 ${all.length} − 待定${zCount}项` : `共 ${all.length} 项`}
+          />
+          <Metric label="完成" value={`${vCount}`} unit="项" tone="emerald" />
+          {(() => {
+            const rate = effective.length > 0 ? (vCount / effective.length) * 100 : 0;
+            const up = prevRate !== null && prevRate !== undefined ? rate >= prevRate : true;
+            const diff = prevRate !== null && prevRate !== undefined ? rate - prevRate : null;
+            return (
+              <>
+                <Metric label="完成率" value={rate.toFixed(1)} unit="%" tone="blue" />
+                {diff !== null && (
+                  <>
+                    <div className="w-px h-7 bg-slate-300/70 flex-shrink-0" />
+                    <Metric label="较上月" value={`${up ? '↑' : '↓'} ${Math.abs(diff).toFixed(1)}`} unit="%" tone={up ? 'emerald' : 'red'} />
+                  </>
+                )}
+              </>
+            );
+          })()}
           <div className="flex-1" />
           {all.length > 0 && (
-            <span className="text-base text-slate-400">新节点 = 同项（同KPI+责任人+原因分析）全表最新节点</span>
+            <span className="text-base text-slate-400">未处理 {pendingRows.length} 项 · 待定 {zCount} 项</span>
           )}
         </div>
       </div>
@@ -791,38 +829,44 @@ function GsmaltStatsSlide({ items, monthLabel, loading, error }: {
   const stats = useMemo(() => {
     const v = items.filter(i => i.audit === 0);
     const x = items.filter(i => i.audit === 1);
-    const z = items.filter(i => i.audit === 2);
-    const none = items.filter(i => i.audit === null); // 未稽核（未处理）
-    const byDept: Record<string, { v: number; x: number; z: number; n: number }> = {};
-    for (const i of items) {
+    const z = items.filter(i => i.audit === 2 || Number(i.audit) === 2);
+    const none = items.filter(i => i.audit === null || i.audit === undefined);
+    // 与第一页口径一致：打0（待定）不归属任何板块，不计入总数与分布（双重过滤：audit===2 及 Number 兼容）
+    const effective = items.filter(i => i.audit !== 2 && Number(i.audit) !== 2);
+    const byDept: Record<string, { v: number; x: number; n: number }> = {};
+    for (const i of effective) {
       const k = (i.dept || '未分配').trim() || '未分配';
-      byDept[k] = byDept[k] || { v: 0, x: 0, z: 0, n: 0 };
+      byDept[k] = byDept[k] || { v: 0, x: 0, n: 0 };
       if (i.audit === 0) byDept[k].v++;
       else if (i.audit === 1) byDept[k].x++;
-      else if (i.audit === 2) byDept[k].z++;
       else byDept[k].n++;
     }
     const deptRows = Object.entries(byDept)
-      .map(([dept, n]) => ({ dept, ...n, total: n.v + n.x + n.z + n.n }))
+      .map(([dept, n]) => ({ dept, ...n, total: n.v + n.x + n.n }))
       .sort((a, b) => b.total - a.total);
     const deptMax = deptRows.length ? deptRows[0].total : 1;
     const rate = v.length + x.length > 0 ? (v.length / (v.length + x.length)) * 100 : null;
     const withNewJd = x.filter(i => i.newJd).length;
-    return { v: v.length, x: x.length, z: z.length, none: none.length, total: items.length, deptRows, deptMax, rate, withNewJd };
+    return { v: v.length, x: x.length, z: z.length, none: none.length, total: effective.length, deptRows, deptMax, rate, withNewJd };
   }, [items]);
 
   const cards = [
-    { label: '总项数', value: stats.total, cls: 'text-slate-800', bg: 'bg-slate-50', ring: 'ring-slate-100' },
+    {
+      label: '总项数（打0不计入）', value: stats.total, cls: 'text-slate-800', bg: 'bg-slate-50', ring: 'ring-slate-100',
+      sub: (stats.z || items.length - stats.total) > 0
+        ? `共 ${items.length} − 待定 ${(items.length - stats.total)} 项 = ${stats.total}`
+        : `共 ${items.length} 项，无待定项`
+    },
     { label: 'V 达标', value: stats.v, cls: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-100' },
     { label: 'X 未完成', value: stats.x, cls: 'text-red-600', bg: 'bg-red-50', ring: 'ring-red-100' },
-    { label: '0 待定', value: stats.z, cls: 'text-blue-600', bg: 'bg-blue-50', ring: 'ring-blue-100' },
+    { label: '未稽核', value: stats.none, cls: 'text-amber-600', bg: 'bg-amber-50', ring: 'ring-amber-100' },
   ];
 
   return (
     <SlideShell
       eyebrow="绩效面谈"
       title={`绩效面谈 KPI 汇总 · ${monthLabel}`}
-      subtitle={`数据源：OA 战略目标稽核表（GSMALT）· 共 ${stats.total} 项`}
+      subtitle={`数据源：OA 战略目标稽核表（GSMALT）· 共 ${stats.total} 项（全 ${items.length} − 待定 ${items.length - stats.total} 已排除）`}
       accent="from-rose-500 to-orange-500"
     >
       {loading ? (
@@ -845,6 +889,9 @@ function GsmaltStatsSlide({ items, monthLabel, loading, error }: {
               <div key={c.label} className={cn('relative rounded-2xl p-5 ring-1 overflow-hidden', c.bg, c.ring)}>
                 <div className="text-base font-semibold text-slate-500">{c.label}</div>
                 <div className={cn('text-6xl font-black mt-1 tabular-nums', c.cls)}>{c.value}</div>
+                {c.sub && (
+                  <div className="mt-2 text-xs font-medium text-slate-400 tracking-wide tabular-nums">{c.sub}</div>
+                )}
               </div>
             ))}
           </div>
@@ -854,11 +901,10 @@ function GsmaltStatsSlide({ items, monthLabel, loading, error }: {
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-slate-400" />
-                <h3 className="text-base font-bold text-slate-700">部门稽核分布（V / 0 / X / 未稽核）</h3>
+                <h3 className="text-base font-bold text-slate-700">部门稽核分布（V / X / 未稽核）</h3>
               </div>
               <div className="flex items-center gap-3 text-base text-slate-500">
                 <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" />V</span>
-                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400" />0</span>
                 <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-500" />X</span>
                 <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-slate-300" />未稽核</span>
               </div>
@@ -871,16 +917,13 @@ function GsmaltStatsSlide({ items, monthLabel, loading, error }: {
                     {r.total > 0 && (
                       <>
                         <div className="h-full bg-emerald-500/90" style={{ width: `${(r.v / stats.deptMax) * 100}%` }} />
-                        <div className="h-full bg-blue-400/90" style={{ width: `${(r.z / stats.deptMax) * 100}%` }} />
                         <div className="h-full bg-red-500/90" style={{ width: `${(r.x / stats.deptMax) * 100}%` }} />
                         <div className="h-full bg-slate-300/90" style={{ width: `${(r.n / stats.deptMax) * 100}%` }} />
                       </>
                     )}
                   </div>
-                  <div className="w-44 text-base tabular-nums whitespace-nowrap">
+                  <div className="w-36 text-base tabular-nums whitespace-nowrap">
                     <span className="text-emerald-600 font-semibold">V{r.v}</span>
-                    <span className="text-slate-300 mx-0.5">/</span>
-                    <span className="text-blue-500 font-semibold">0{r.z}</span>
                     <span className="text-slate-300 mx-0.5">/</span>
                     <span className="text-red-600 font-semibold">X{r.x}</span>
                     <span className="text-slate-300 mx-0.5">/</span>
@@ -984,11 +1027,13 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 // 滑动演示主体
 // ─────────────────────────────────────────────────────────────
 export default function MonthlyBoardPage() {
+  const { denied: permDenied } = useBoardPermission('monthly');
   const [items, setItems] = useState<BoardItem[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>>({});
   const [gsmalt, setGsmalt] = useState<GsmaltItem[]>([]);
   const [gsmaltLoading, setGsmaltLoading] = useState(false);
   const [gsmaltError, setGsmaltError] = useState<string | null>(null);
+  const [gsmaltPrevRate, setGsmaltPrevRate] = useState<number | null>(null); // 上月绩效面谈完成率（较上月对比用）
   const [loading, setLoading] = useState(true);
   const [immersive, setImmersive] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -1176,8 +1221,27 @@ export default function MonthlyBoardPage() {
       })
       .catch(() => { if (!cancelled) setGsmaltError('战略稽核数据加载失败'); })
       .finally(() => { if (!cancelled) setGsmaltLoading(false); });
+
+    // 同时取上月 gsmalt 数据，用于底部"较上月"对比
+    const prevRef = new Date();
+    prevRef.setMonth(prevRef.getMonth() - 2 - monthOffset);
+    const prevLabel = `${prevRef.getFullYear()}-${String(prevRef.getMonth() + 1).padStart(2, '0')}`;
+    fetch(`/api/gsmalt?month=${prevLabel}`)
+      .then(r => r.json())
+      .then(j => {
+        if (cancelled) return;
+        if (j.success) {
+          const prevItems = j.items || [];
+          const prevEffective = prevItems.filter((i: any) => (i.audit === 0 || i.audit === 1 || i.audit === null)); // 较上月：同口径排除打0(audit=2)待定
+          const prevTotal = prevEffective.length;
+          const prevDone = prevItems.filter((i: any) => i.audit === 0).length;
+          setGsmaltPrevRate(prevTotal > 0 ? (prevDone / prevTotal) * 100 : null);
+        }
+      })
+      .catch(() => {});
+
     return () => { cancelled = true; };
-  }, [lastMonthLabel]);
+  }, [lastMonthLabel, monthOffset]);
 
   // 战略稽核打X项
   const gsmaltXItems = useMemo(() => gsmalt.filter(i => i.audit === 1), [gsmalt]);
@@ -1192,8 +1256,9 @@ export default function MonthlyBoardPage() {
       const { start, end } = monthRange(ref);
       const moItems = items.filter(i => {
         if ((i.meeting_type !== '公司月会')) return false;
-        if (i.due_date_type === 'continuous') return false; // 仅核算行动项台账，不含持续项
-        if (i.due_date_type === 'tbd' || !i.due_date) return false; // 日期未明确的不算任务项
+        if (i.due_date_type === 'continuous') return false;
+        if (i.due_date_type === 'tbd' || !i.due_date) return false;
+        if ((i as any).oa_score === 0) return false; // 打0（待定）不计入目标数与完成率
         const dd = new Date(i.due_date.slice(0, 10));
         return dd >= start && dd <= end;
       });
@@ -1214,9 +1279,9 @@ export default function MonthlyBoardPage() {
     const dataYear = dataRef.getFullYear();
     const dataMonth = dataRef.getMonth() + 1;
 
-    // 数据月无数据 → 模拟兜底
+    // 数据月无数据 → 显示 0（不再用模拟数字误导）
     if (!dataM.hasData) {
-      return { year: dataYear, monthNum: dataMonth, target: 12, done: 9, rate: 75, diff: 4, mock: true };
+      return { year: dataYear, monthNum: dataMonth, target: 0, done: 0, rate: 0, diff: 0, mock: false };
     }
     const rate = dataM.rate ?? 0;
     const diff = compareM.rate !== null ? rate - compareM.rate : 0;
@@ -1226,7 +1291,7 @@ export default function MonthlyBoardPage() {
   // 幻灯片清单 —— 后续异构页在此追加
   const slides = useMemo(() => [
     { id: 'overdue', label: '未完成项通报', node: <OverdueNoticeSlide items={lastMonthItems} doneItems={lastMonthDoneItems} allItems={items} monthLabel={lastMonthLabel} stats={monthStats} onDoneClick={setDoneDetail} /> },
-    { id: 'gsmalt-x', label: '绩效面谈·未达成KPI', node: <GsmaltXSlide items={gsmaltXItems} all={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} /> },
+    { id: 'gsmalt-x', label: '绩效面谈·未达成KPI', node: <GsmaltXSlide items={gsmaltXItems} all={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} prevRate={gsmaltPrevRate} /> },
     { id: 'continuous-pending', label: '持续项汇报', node: <ContinuousSlide items={continuousPendingItems} mode="pending" progressMap={progressMap} onShowDetail={setContDetail} /> },
     { id: 'gsmalt-stats', label: '绩效面谈·KPI汇总', node: <GsmaltStatsSlide items={gsmalt} monthLabel={lastMonthLabel} loading={gsmaltLoading} error={gsmaltError} /> },
     { id: 'stats', label: '总览', node: <StatsSlide items={monthlyItems} contItems={monthlyContItems} progressMap={progressMap} /> },
@@ -1234,6 +1299,10 @@ export default function MonthlyBoardPage() {
 
   const goPrev = () => api?.scrollPrev();
   const goNext = () => api?.scrollNext();
+
+  if (permDenied) {
+    return <DashboardLayout><BoardDeniedPage boardName="月度看板" /></DashboardLayout>;
+  }
 
   return (
     <DashboardLayout>
@@ -1341,12 +1410,11 @@ export default function MonthlyBoardPage() {
             ))}
           </div>
         </div>
-      </div>
 
-      {/* 已完成项详情弹窗（浮于投屏/沉浸层之上） */}
-      <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
-      {/* 持续项自动取数明细弹窗 */}
-      <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
+        {/* 详情弹窗（在 deckRef 内，沉浸/全屏模式可见） */}
+        <ActionDoneDetailDialog item={doneDetail} onClose={() => setDoneDetail(null)} />
+        <ContinuousDetailDialog item={contDetail} onClose={() => setContDetail(null)} />
+      </div>
     </DashboardLayout>
   );
 }

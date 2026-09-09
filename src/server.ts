@@ -458,6 +458,31 @@ function scheduleContinuousAutoFetch() {
   scheduleNext();
 }
 
+// ── 行动项「到期自动打X+转派」：每天 09:00（北京时间）先推预警再打X ──
+function scheduleAutoOverdueX() {
+  const scheduleNext = () => {
+    const nextFire = computeNextFire('09:00');
+    if (!nextFire) return;
+    const delay = nextFire.getTime() - Date.now();
+    console.log(`[AutoOverdueX] 下次检查: ${nextFire.toLocaleString()}`);
+    setTimeout(async () => {
+      try {
+        const { runDueReminder, runAutoOverdueX } = await import('@/lib/auto-overdue-processor');
+        // A. 到期前预警（明天到期）
+        const reminder = await runDueReminder(false);
+        console.log(`[AutoOverdueX] 预警：明天(${reminder.tomorrow})到期 ${reminder.candidates} 条，推送 ${reminder.pushed}`);
+        // B. 到期后打X+转派
+        const xResult = await runAutoOverdueX(false);
+        console.log(`[AutoOverdueX] 打X：${xResult.yesterday} 前到期 ${xResult.candidates} 条，打X ${xResult.xCount}，新任务 ${xResult.newTaskCount}，推送 ${xResult.pushed}`);
+      } catch (e) {
+        console.error('[AutoOverdueX] 执行异常:', e instanceof Error ? e.message : e);
+      }
+      scheduleNext();
+    }, delay);
+  };
+  scheduleNext();
+}
+
 // Create Next.js app
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
@@ -590,5 +615,7 @@ app.prepare().then(() => {
     scheduleContinuousPush();
     // 持续项自动取数调度（每周一凌晨）
     scheduleContinuousAutoFetch();
+    // 行动项到期自动打X+转派调度（每天 09:00）
+    scheduleAutoOverdueX();
   });
 });

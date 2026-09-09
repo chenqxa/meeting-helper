@@ -95,8 +95,14 @@ export const RoleGuard = {
   canManageOrg: (role: UserRole) => role === 'admin',
   /** 可以查看组织架构 */
   canViewOrg: (role: UserRole) => role === 'admin',
-  /** 可以访问看板（周例会/月度/产销会） */
+  /** 可以访问看板（周例会/月度/产销会）——总开关 */
   canViewBoard: (role: UserRole) => role === 'admin' || role === 'manager' || role === 'secretary',
+  /** 可以访问周例会看板 */
+  canViewWeeklyBoard: (role: UserRole) => role === 'admin' || role === 'manager' || role === 'secretary',
+  /** 可以访问月度看板 */
+  canViewMonthlyBoard: (role: UserRole) => role === 'admin' || role === 'manager' || role === 'secretary',
+  /** 可以访问产销会看板 */
+  canViewProductionBoard: (role: UserRole) => role === 'admin' || role === 'manager' || role === 'secretary',
   /** 可以处置反馈（处理/删除） */
   canManageFeedback: (role: UserRole) => role === 'admin',
   /** 可以管理角色名单 */
@@ -143,7 +149,10 @@ export async function isSystemAdmin(loginid: string | null | undefined): Promise
 
 /** 权限矩阵元数据：权限管理页展示用（标签与分组顺序） */
 export const PERMISSION_MATRIX: Array<{ key: PermissionKey; label: string; group: string }> = [
-  { key: 'canViewBoard', label: '看板（周例会/月度/产销会）', group: '查看' },
+  { key: 'canViewBoard', label: '看板总开关', group: '查看' },
+  { key: 'canViewWeeklyBoard', label: '周例会看板', group: '查看' },
+  { key: 'canViewMonthlyBoard', label: '月度看板', group: '查看' },
+  { key: 'canViewProductionBoard', label: '产销会看板', group: '查看' },
   { key: 'canViewTracking', label: '行动项台账', group: '查看' },
   { key: 'canViewContinuous', label: '持续项跟进', group: '查看' },
   { key: 'canViewAllTasks', label: '全部任务看板', group: '查看' },

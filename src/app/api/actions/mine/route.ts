@@ -49,6 +49,8 @@ export async function GET(request: Request) {
     } catch { /* batch table may not exist yet */ }
 
     const myActions = allItems.filter(item => {
+      // 打0（待定）项不出现在个人待办：与看板口径一致（打0不归属任何板块、不催办）
+      if (item.oaScore === 0) return false;
       const owner = (item.owner || '').trim().toLowerCase();
       const ownerLoginId = (item.ownerLoginId || '').trim().toLowerCase();
       const isMyAction = (

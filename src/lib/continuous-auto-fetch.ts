@@ -197,6 +197,54 @@ async function fetchOaPriceMaintenance(win: AutoFetchWindow, candidates: AutoFet
   }
 }
 
+// 5) 打样及时率：OA 样品申请单（formtable_main_198），比较收到样品日期 vs 预计交样日期
+async function fetchOaSampleTimeliness(win: AutoFetchWindow, candidates: AutoFetchCandidate[]): Promise<AutoFetchRecord[]> {
+  if (candidates.length === 0) return [];
+  const linked = process.env.AUTO_FETCH_OA_LINKED || 'FWsv.ecology';
+  const qname = linkedObject(linked);
+  const pool = await new sql.ConnectionPool(parseConnectionString()).connect();
+  try {
+    const r = await pool.request()
+      .input('s', sql.NVarChar, win.startLabel)
+      .input('e', sql.NVarChar, win.endLabel)
+      .query(`
+        SELECT f.djbh, f.sqrq, f.yjjyrq, f.sdyprq
+        FROM ${qname}.dbo.formtable_main_198 f
+        WHERE LTRIM(RTRIM(ISNULL(f.sdyprq, ''))) >= @s
+          AND LTRIM(RTRIM(ISNULL(f.sdyprq, ''))) <= @e
+          AND LTRIM(RTRIM(ISNULL(f.yjjyrq, ''))) <> ''
+        ORDER BY f.sdyprq
+      `);
+    const rows: any[] = r.recordset || [];
+    const clean = (v: unknown) => String(v || '').trim().slice(0, 10);
+    const valid = rows.filter(row => clean(row.sdyprq) && clean(row.yjjyrq));
+
+    const total = valid.length;
+    const onTime = valid.filter(row => clean(row.sdyprq) <= clean(row.yjjyrq)).length;
+    const rate = total > 0 ? Math.round((onTime / total) * 100) : 0;
+
+    const detail = [{
+      kind: 'sample',
+      bill: `打样明细`,
+      date: `${win.startLabel}~${win.endLabel}`,
+      status: '',
+      supplier: '',
+      use: total > 0 ? `及时 ${onTime}/${total}（${rate}%）` : '本周无收到样品',
+      lines: valid.map(row => ({
+        djbh: clean(row.djbh) || '—',
+        sqrq: clean(row.sqrq),
+        yjjyrq: clean(row.yjjyrq),
+        sdyprq: clean(row.sdyprq),
+        onTime: clean(row.sdyprq) <= clean(row.yjjyrq) ? '✓' : '✗',
+      })),
+    }];
+    const progress = total > 0 ? `打样及时率 · 本周 ${rate}%（${onTime}/${total}）` : '打样及时率 · 本周无收到样品';
+    return candidates.map(c => ({ actionId: c.id, progress, detail }));
+  } finally {
+    await pool.close();
+  }
+}
+
 // 3) 工价维护：OA 工价审批单（formtable_main_51 + 明细 dt1，已批准/归档）
 // 主表一张 = 整机工价审批（车间/整机/工价合计），明细 = 按工序拆分的工价行
 async function fetchOaWorkPriceMaintenance(win: AutoFetchWindow, candidates: AutoFetchCandidate[]): Promise<AutoFetchRecord[]> {
@@ -311,11 +359,147 @@ async function fetchOaSupplierReview(win: AutoFetchWindow, candidates: AutoFetch
   }
 }
 
+// 6) 账期改善：K3 采购发票 + 供应商付款条件，按月统计60天以上占比（三层穿透）
+const TERM_MAP: Record<number, { name: string; days60: boolean }> = {
+  1002: { name: '票到30天', days60: false },
+  1003: { name: '票到60天', days60: true },
+  1004: { name: '票到90天', days60: true },
+  1005: { name: '票到120天', days60: true },
+  1006: { name: '票到付款', days60: false },
+  1008: { name: '预付款',   days60: false },
+  1032: { name: '月结',     days60: false },
+  0:    { name: '未设置',   days60: false },
+};
+
+async function fetchK3PaymentTerms(win: AutoFetchWindow, candidates: AutoFetchCandidate[]): Promise<AutoFetchRecord[]> {
+  if (candidates.length === 0) return [];
+  const linked = process.env.AUTO_FETCH_K3_LINKED || 'k3sv.AIS20161019115614';
+  const qname = linkedObject(linked);
+  const pool = await new sql.ConnectionPool(parseConnectionString()).connect();
+  try {
+    // 口径：统计截止"上月末"（9月展示1~8月，10月展示1~9月，依此类推）
+    // 根据数据窗口所在月份（win.endLabel 的月份），往前推一个月作为数据截止
+    const windowYM = win.endLabel.slice(0, 7);
+    const [wy, wm] = windowYM.split('-').map(Number);
+    const prevYM = wm === 1 ? `${wy - 1}-12` : `${wy}-${String(wm - 1).padStart(2, '0')}`;
+    const [y, m] = prevYM.split('-').map(Number);
+    const year = String(y);
+    const lastDay = new Date(y, m, 0).getDate(); // 上月最后一天
+    const monthStart = year + '-01-01';
+    const monthEnd = `${prevYM}-${String(lastDay).padStart(2, '0')}`;
+
+    // 按付款条件分组统计家数+金额
+    const r = await pool.request()
+      .input('s', sql.NVarChar, monthStart)
+      .input('e', sql.NVarChar, monthEnd)
+      .query(`
+        SELECT s.FCreditDays, COUNT(DISTINCT s.FItemID) AS supCnt, SUM(v.FTotalCostFor) AS totalAmt
+        FROM ${qname}.dbo.v_rp_PurchaseInvoice v
+        INNER JOIN ${qname}.dbo.t_Supplier s ON s.FItemID = v.FSupplyID
+        WHERE v.FDate >= @s AND v.FDate <= @e
+        GROUP BY s.FCreditDays
+        ORDER BY SUM(v.FTotalCostFor) DESC`);
+    const rows: any[] = r.recordset || [];
+    if (rows.length === 0) {
+      return candidates.map(c => ({ actionId: c.id, progress: `账期改善 · ${year}年暂无发票数据`, detail: [] }));
+    }
+
+    let totalSup = 0, total60Sup = 0, totalAmt = 0, total60Amt = 0;
+    const termLines: any[] = [];
+    for (const row of rows) {
+      const cd = Number(row.FCreditDays || 0);
+      const term = TERM_MAP[cd] || { name: `未知(${cd})`, days60: false };
+      totalSup += row.supCnt;
+      totalAmt += Number(row.totalAmt || 0);
+      if (term.days60) { total60Sup += row.supCnt; total60Amt += Number(row.totalAmt || 0); }
+      termLines.push({
+        termName: term.name, supCnt: row.supCnt,
+        amt: Math.round(Number(row.totalAmt || 0)),
+        days60: term.days60,
+      });
+    }
+    const supRate = totalSup > 0 ? ((total60Sup / totalSup) * 100).toFixed(1) : '0';
+    const amtRate = totalAmt > 0 ? ((total60Amt / totalAmt) * 100).toFixed(1) : '0';
+
+    // 每个付款条件下的供应商明细（按金额倒序，取前20家）
+    const suppliersByTerm: Record<string, { number: string; name: string; amt: number }[]> = {};
+    for (const line of termLines) {
+      // 找到该条件的 FCreditDays 值
+      const cdEntry = Object.entries(TERM_MAP).find(([, v]) => v.name === line.termName);
+      if (!cdEntry) continue;
+      const cdVal = cdEntry[0];
+      const sup = await pool.request()
+        .input('s', sql.NVarChar, monthStart)
+        .input('e', sql.NVarChar, monthEnd)
+        .input('cd', sql.Int, parseInt(cdVal))
+        .query(`
+          SELECT TOP 20 s.FNumber, s.FName, SUM(v.FTotalCostFor) AS amt
+          FROM ${qname}.dbo.v_rp_PurchaseInvoice v
+          INNER JOIN ${qname}.dbo.t_Supplier s ON s.FItemID = v.FSupplyID
+          WHERE v.FDate >= @s AND v.FDate <= @e AND s.FCreditDays = @cd
+          GROUP BY s.FNumber, s.FName
+          ORDER BY SUM(v.FTotalCostFor) DESC`);
+      suppliersByTerm[line.termName] = (sup.recordset || []).map((d: any) => ({
+        number: String(d.FNumber || ''), name: String(d.FName || '').trim(),
+        amt: Math.round(Number(d.amt || 0)),
+      }));
+    }
+
+    // 月度趋势（按月统计家数和金额占比）
+    const trend = await pool.request()
+      .input('s', sql.NVarChar, monthStart)
+      .input('e', sql.NVarChar, monthEnd)
+      .query(`
+        SELECT
+          CONVERT(varchar(7), v.FDate, 120) AS [month],
+          COUNT(DISTINCT s.FItemID) AS supCnt,
+          SUM(v.FTotalCostFor) AS totalAmt,
+          COUNT(DISTINCT CASE WHEN s.FCreditDays IN (1003, 1004, 1005) THEN s.FItemID END) AS sup60Cnt,
+          SUM(CASE WHEN s.FCreditDays IN (1003, 1004, 1005) THEN v.FTotalCostFor ELSE 0 END) AS amt60
+        FROM ${qname}.dbo.v_rp_PurchaseInvoice v
+        INNER JOIN ${qname}.dbo.t_Supplier s ON s.FItemID = v.FSupplyID
+        WHERE v.FDate >= @s AND v.FDate <= @e
+        GROUP BY CONVERT(varchar(7), v.FDate, 120)
+        ORDER BY [month]`);
+    const monthlyTrend = (trend.recordset || []).map((t: any) => {
+      const ts = Number(t.supCnt || 0), ts60 = Number(t.sup60Cnt || 0);
+      const ta = Number(t.totalAmt || 0), ta60 = Number(t.amt60 || 0);
+      return {
+        month: String(t.month || ''),
+        supCnt: ts, sup60: ts60,
+        supRate: ts > 0 ? Number(((ts60 / ts) * 100).toFixed(1)) : 0,
+        totalAmt: Math.round(ta), amt60: Math.round(ta60),
+        amtRate: ta > 0 ? Number(((ta60 / ta) * 100).toFixed(1)) : 0,
+      };
+    });
+
+    const detail = [{
+      kind: 'payment-terms',
+      bill: `付款条件分布`,
+      date: `${year}年1~${m}月`,
+      status: '',
+      supplier: '',
+      use: `60天以上 家数${supRate}% / 金额${amtRate}%（目标65%/75%）`,
+      lines: termLines,
+      suppliers: suppliersByTerm,
+      summary: { totalSup, total60Sup, supRate, totalAmt, total60Amt, amtRate },
+      monthlyTrend,
+    }];
+
+    const progress = `账期改善 · ${year}年1~${m}月 60天以上${supRate}%（目标65%）`;
+    return candidates.map(c => ({ actionId: c.id, progress, detail }));
+  } finally {
+    await pool.close();
+  }
+}
+
 const SOURCE_IMPLS: Record<string, SourceFetcher> = {
   'k3-scrap-issue': fetchK3ScrapIssue,
   'oa-price-maintenance': fetchOaPriceMaintenance,
   'oa-work-price-maintenance': fetchOaWorkPriceMaintenance,
   'oa-supplier-review': fetchOaSupplierReview,
+  'oa-sample-timeliness': fetchOaSampleTimeliness,
+  'k3-payment-terms': fetchK3PaymentTerms,
 };
 
 export function isValidSourceKey(key?: string | null): boolean {

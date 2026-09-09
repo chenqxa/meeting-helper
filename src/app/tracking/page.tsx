@@ -980,7 +980,7 @@ export default function TrackingPage() {
                     <td className="px-4 py-3 text-slate-800 max-w-[280px]">
                       <div className="line-clamp-2" title={item.description}>{item.description}</div>
                       <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-                        <span className="text-[10px] text-slate-400 truncate">📋 {item.meeting_title || '独立任务'}</span>
+                        <span className="text-[10px] text-slate-400 truncate">📋 {item.meeting_title || item.meeting_type || '独立任务'}</span>
                         {item.meeting_id ? (
                         <Link href={`/meeting/${item.meeting_id}`} target="_blank"
                           className="text-[10px] text-blue-400 hover:text-blue-600 flex items-center gap-0.5 shrink-0">

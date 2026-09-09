@@ -141,6 +141,14 @@ export async function PUT(
       'auto_fetch',
     ];
     const SELF_REPORT_STATUSES = ['in_progress', 'done', 'blocked'];
+    // tbd（自动转派）任务：责任人允许带 due_date/due_date_type 填节点（可只设日期不做汇报）
+    let tbdSelfDueDate: string | null = null;
+    if (existing.dueDateType === 'tbd' && body.due_date !== undefined) {
+      tbdSelfDueDate = String(body.due_date).slice(0, 10) || null;
+      delete body.due_date;
+      delete body.dueDate;
+      delete body.due_date_type;
+    }
     const hasAdminOnlyFields = FORBIDDEN_KEYS.some(k => k in body);
     const statusOk = body.status === undefined || SELF_REPORT_STATUSES.includes(body.status);
     const currentUser = await getCurrentUser();
@@ -149,7 +157,17 @@ export async function PUT(
     );
     const isSelfReport = !hasAdminOnlyFields && statusOk && isOwner;
 
-    if (!isSelfReport) {
+    // 自报"未完成"带下次完成时间：责任人允许，不触发 admin 校验（后面走重派逻辑）
+    let selfNextDueDate: string | null = null;
+    if (body.next_due_date !== undefined && body.status === 'blocked' && isOwner) {
+      selfNextDueDate = String(body.next_due_date).slice(0, 10) || null;
+      delete body.next_due_date;
+    }
+    // 重新计算（next_due_date 已摘除）
+    const hasAdminOnlyFieldsFinal = FORBIDDEN_KEYS.some(k => k in body);
+    const isSelfReportFinal = !hasAdminOnlyFieldsFinal && statusOk && isOwner;
+
+    if (!isSelfReportFinal) {
       const guard = await guardWrite('admin');
       if (!guard.ok) return guard.response;
     }
@@ -163,6 +181,12 @@ export async function PUT(
       }
       await updateActionAutoFetch(targetActionId, enabled, sourceKey);
       return NextResponse.json({ success: true, data: { id: targetActionId, auto_fetch: enabled ? 1 : 0, auto_fetch_source: sourceKey } });
+    }
+
+    // tbd 只设日期（轻量路径）：不做汇报、不触发通知/重派/日志等副作用
+    if (tbdSelfDueDate && Object.keys(body).filter(k => !k.startsWith('_')).length === 0) {
+      await updateActionItem(targetActionId, { dueDate: tbdSelfDueDate, dueDateType: 'date' } as any);
+      return NextResponse.json({ success: true, data: { id: targetActionId, dueDate: tbdSelfDueDate, dueDateType: 'date' } });
     }
 
     const patch: Record<string, any> = {};
@@ -258,6 +282,16 @@ export async function PUT(
 
     const updated = await updateActionItem(targetActionId, patch);
 
+    // tbd 自报填节点：责任人首次给自动转派任务设定节点日期（tbd → date）
+    if (tbdSelfDueDate && updated?.dueDateType === 'tbd') {
+      try {
+        await updateActionItem(targetActionId, { dueDate: tbdSelfDueDate, dueDateType: 'date' } as any);
+        console.log(`[PUT action] tbd 自报填节点: ${targetActionId} → ${tbdSelfDueDate}`);
+      } catch (e) {
+        console.warn(`[PUT action] tbd 填节点失败 ${targetActionId}:`, e instanceof Error ? e.message : e);
+      }
+    }
+
     // ── 完成闭环通知：首次标记"已完成"时异步通知提出人（企微卡片，不阻塞提交）──
     if (body.status === 'done' && existing.status !== 'done') {
       void import('@/lib/wecom-action-push').then(m =>
@@ -278,15 +312,37 @@ export async function PUT(
     let rescheduledError: string | null = null;
     if (
       body.status === 'blocked' &&
-      body.next_due_date &&
+      (body.next_due_date || selfNextDueDate) &&
       existing.dueDateType !== 'continuous' &&
       !existing.reassignedTo
     ) {
       try {
-        const r = await rescheduleActionItem(existing as any, String(body.next_due_date).slice(0, 10));
+        const r = await rescheduleActionItem(existing as any, String(body.next_due_date || selfNextDueDate).slice(0, 10));
         if (r.ok) {
           rescheduled = true;
           console.log(`[actions/${targetActionId}] 未完成重派成功，新记录 ${r.newItemId}`);
+
+          // ── 企微通知责任人：新任务已生成，请按新节点处理 ──
+          void (async () => {
+            try {
+              const { sendTextCardMessage, resolveUserIdsByNames } = await import('@/lib/wecom-message');
+              const baseUrl = process.env.NEXT_PUBLIC_APP_URL || '';
+              if (!baseUrl) return;
+              const ownerName = String(existing.owner || '').trim();
+              if (!ownerName) return;
+              const map = await resolveUserIdsByNames([ownerName], false);
+              const uid = map.get(ownerName) || map.get(String(existing.ownerLoginId || ''));
+              if (!uid) return;
+              const newDue = String(body.next_due_date || selfNextDueDate).slice(0, 10);
+              await sendTextCardMessage([uid],
+                '🔄 任务重派通知',
+                `您报告"未完成"的任务已重派：\n任务：${String(existing.description || '').slice(0, 30)}\n新节点：${newDue}\n请按新节点继续处理`,
+                `${baseUrl}/kanban?view=my&shared=true&taskIds=${r.newItemId}`);
+              console.log(`[actions/${targetActionId}] 重派企微通知已发送 → ${ownerName}`);
+            } catch (e) {
+              console.warn(`[actions/${targetActionId}] 重派企微通知失败:`, e instanceof Error ? e.message : e);
+            }
+          })();
         } else {
           rescheduledError = r.error || null;
         }

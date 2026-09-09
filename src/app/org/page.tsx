@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { PermissionMatrix } from '@/app/settings/permissions-tab';
+import { BoardPermissionPanel } from '@/app/org/board-permission-panel';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter
 } from '@/components/ui/dialog';
@@ -784,7 +785,10 @@ export default function OrgPage() {
       )}
 
       {/* ── 权限管理 ── */}
-      {activeTab === 'permissions' && <PermissionMatrix />}
+      {activeTab === 'permissions' && (<>
+        <PermissionMatrix />
+        <BoardPermissionPanel />
+      </>)}
 
       {activeTab === 'org' && (<>
       {/* 顶栏操作 */}

@@ -231,7 +231,9 @@ export async function GET(request: NextRequest) {
         project_id: item.projectId,
         meeting_id: item.meetingId,
         meeting_title: meeting?.title || batch?.title || '',
-        meeting_type: meeting?.type || (item.sourceType === 'batch' ? (item.sourceText || '手动任务') : ''),
+        meeting_type: meeting?.type
+          || (item.sourceType === 'batch' ? (item.sourceText || '手动任务') : '')
+          || (item.sourceType === 'gsmalt' ? (item.sourceText || '绩效面谈') : ''),
         meeting_date: effectiveDate,
         meeting_created_at: meeting?.createdAt || null,
         meeting_status: meeting?.status || 'locked',

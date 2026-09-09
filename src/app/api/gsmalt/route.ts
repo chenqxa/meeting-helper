@@ -4,8 +4,9 @@ import { getAppPool } from '@/lib/oa-task-push';
 
 // ── 战略目标稽核表（GSMALT）月度查询 ──
 // 数据源：OA 链接服务器 FWsv.ecology.dbo
-//   uf_GSMALT 主表 + uf_GSMALT_dt1 明细（jh=稽核 0:V 1:X 2:0，jd=节点日期）
+//   uf_GSMALT 主表 + uf_GSMALT 明细（jh=稽核 0:V 1:X 2:0，jd=节点日期）
 // X 项「新节点」：同 KPI + 同责任人 + 同原因分析 在全表中 jd 最大且晚于原节点的记录
+// 稽核覆盖：若系统内该 gsmalt 项已有 oa_score（人工打了 V/X/0），以系统为准覆盖 OA 的 jh
 
 // OA 链接服务器四段表名
 const oaTable = (n: string) =>
@@ -54,10 +55,11 @@ export async function GET(request: NextRequest) {
     const pool = await getAppPool();
 
     // 1) 数据月明细（与业务提供的口径一致：left(jd,7) = 数据月）
+    // 额外取 b.id（dt1Id）用于匹配系统内 gsmalt 同步项
     const monthRes = await pool.request()
       .input('month', sql.NVarChar, month)
       .query(`
-        SELECT c.kpiz AS kpi, d.departmentname AS dept, e.lastname AS owner,
+        SELECT b.id AS dt1Id, c.kpiz AS kpi, d.departmentname AS dept, e.lastname AS owner,
                b.jh AS audit, b.jd AS jd, b.yyfx2 AS yyfx, b.xdjh2 AS xdjh,
                b.cl AS cl, b.hl AS hl, b.clzbkpi AS kpiId, b.zrr AS zrr
         FROM ${oaTable('uf_GSMALT')} a
@@ -83,10 +85,43 @@ export async function GET(request: NextRequest) {
       if (v) maxMap.set(k, v);
     }
 
+    // ── 系统打分覆盖：系统内 gsmalt 项已有 oa_score 时以系统为准 ──
+    // key = originalId（OA dt1.id）→ { oa_score }
+    // 系统打分 → audit 映射：1(V)→0, -1(X)→1, 0(待定)→2, null→不覆盖（保持OA的jh）
+    let sysScoreMap = new Map<string, number | null>();
+    try {
+      const sysPool = await import('@/storage/database/sqlserver-storage').then(m => m.getPool());
+      const sysRes = await sysPool.request().query(`
+        SELECT original_id, oa_score FROM hyzs_action_items
+        WHERE source_type = 'gsmalt' AND original_id IS NOT NULL`);
+      for (const row of sysRes.recordset) {
+        sysScoreMap.set(String(row.original_id), row.oa_score === null ? null : Number(row.oa_score));
+      }
+    } catch (e) {
+      console.warn('[gsmalt] 系统打分覆盖查询失败（跳过覆盖）:', e instanceof Error ? e.message : e);
+    }
+
     const items: GsmaltItem[] = monthRes.recordset.map((r: Record<string, unknown>) => {
       const jd = normDate(r.jd);
+
+      // OA 原始 audit（强制数字）
+      let audit: number | null = (r.audit === null || r.audit === undefined || String(r.audit).trim() === '')
+        ? null
+        : Number(r.audit);
+
+      // 系统打分覆盖：系统已打分则优先
+      //   系统 1(V) → audit 0, 系统 -1(X) → audit 1, 系统 0(圈0待定) → audit 2
+      const dt1Id = String(r.dt1Id || '');
+      const sysScore = sysScoreMap.get(dt1Id);
+      if (sysScore !== undefined && sysScore !== null) {
+        const nScore = Number(sysScore);
+        if (nScore === 1) audit = 0;
+        else if (nScore === -1) audit = 1;
+        else if (nScore === 0) audit = 2;
+      }
+
       let newJd: string | null = null;
-      if (Number(r.audit) === 1) {
+      if (Number(audit) === 1) {
         const maxJd = maxMap.get(keyOf(r.kpiId, r.zrr, r.yyfx)) || '';
         if (maxJd && maxJd > jd) newJd = maxJd;
       }
@@ -94,8 +129,7 @@ export async function GET(request: NextRequest) {
         kpi: (r.kpi as string) || null,
         dept: (r.dept as string) || null,
         owner: (r.owner as string) || null,
-        // 空值（NULL/''/whitespace）归一为 null = 未稽核，避免 Number('') === 0 被误判为 V
-        audit: r.audit === null || r.audit === undefined || String(r.audit).trim() === '' ? null : Number(r.audit),
+        audit,
         jd: jd || null,
         yyfx: (r.yyfx as string) || null,
         xdjh: (r.xdjh as string) || null,

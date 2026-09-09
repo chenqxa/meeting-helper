@@ -18,7 +18,7 @@
 |------|------|------|
 | `src/app/api/actions/route.ts` | 响应新增 `original_id`（系统行 ↔ OA dt1.id 关联键） | 接口 |
 | `src/app/api/gsmalt/route.ts` | 响应新增 `dt1Id`（OA dt1.id） | 接口 |
-| `src/app/monthly-board/page.tsx` | `BoardItem` 加 `original_id` / `source_type`；`GsmaltItem` 加 `dt1Id`；新增 `gsmaltItemMap`（`original_id → BoardItem`）+ `handleGsmaltDoneClick`；`GsmaltRow` 支持 `onClick`；`GsmaltXSlide` 接 `onDoneClick` 仅对 ✓ 已完成项生效；挂载复用既有 `ActionDoneDetailDialog` | 页面 |
+| `src/app/monthly-board/page.tsx` | `BoardItem` 加 `original_id` / `source_type`；`GsmaltItem` 加 `dt1Id`；新增 `gsmaltItemMap`（`original_id → BoardItem`）+ `handleGsmaltDoneClick`；`GsmaltRow` 支持 `onClick`；`GsmaltXSlide` 接 `onDoneClick` 仅对 ✓ 已完成项生效；挂载复用既有 `ActionDoneDetailDialog`；底部统计移除打0（待定）的展示，Metric 简化为 `目标 / 完成 / 完成率 / 较上月`，右侧仅保留 `未处理 N 项` | 页面 |
 | `src/components/board/gsmalt-done-detail-dialog.tsx` | **删除**（第一版错误实现，复用 `ActionDoneDetailDialog` 后不再需要） | 移除 |
 
 > 无后端 / 数据库表 / 持续项 / OA 同步逻辑改动。

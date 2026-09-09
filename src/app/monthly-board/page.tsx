@@ -717,7 +717,6 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate, onDone
   const doneRows = effective.filter(i => i.audit === 0); // V 达标（已完成）
   const vCount = doneRows.length;
   const xCount = effective.filter(i => i.audit === 1).length;
-  const zCount = all.filter(i => i.audit === 2 || Number(i.audit) === 2).length; // 打0数（仅展示用）
   return (
     <div className="relative w-full h-full bg-white rounded-xl shadow-2xl ring-1 ring-slate-200/60 overflow-hidden flex flex-col">
       {/* 标题栏：深红渐变 + 警示竖条 */}
@@ -796,7 +795,7 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate, onDone
         )}
       </div>
 
-      {/* 底部统计栏：仿第一页格式（含较上月）+ 明确圈0排除口径 */}
+      {/* 底部统计栏：仿第一页格式（含较上月）；打0（待定）已从前端排除，仅展示有效项 */}
       <div className="flex-shrink-0 border-t border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100/60 px-7 py-3">
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -804,11 +803,10 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate, onDone
           </div>
           <div className="w-px h-7 bg-slate-300/70 flex-shrink-0" />
           <Metric
-            label="目标（已排除圈0）"
+            label="目标"
             value={`${effective.length}`}
             unit="项"
             tone="slate"
-            sub={zCount > 0 ? `共 ${all.length} − 待定${zCount}项` : `共 ${all.length} 项`}
           />
           <Metric label="完成" value={`${vCount}`} unit="项" tone="emerald" />
           {(() => {
@@ -829,7 +827,7 @@ function GsmaltXSlide({ items, all, monthLabel, loading, error, prevRate, onDone
           })()}
           <div className="flex-1" />
           {all.length > 0 && (
-            <span className="text-base text-slate-400">未处理 {pendingRows.length} 项 · 待定 {zCount} 项</span>
+            <span className="text-base text-slate-400">未处理 {pendingRows.length} 项</span>
           )}
         </div>
       </div>

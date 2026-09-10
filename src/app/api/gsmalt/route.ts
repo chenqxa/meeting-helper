@@ -88,10 +88,13 @@ export async function GET(request: NextRequest) {
     // ── 系统打分覆盖：系统内 gsmalt 项已有 oa_score 时以系统为准 ──
     // key = originalId（OA dt1.id）→ { oa_score }
     // 系统打分 → audit 映射：1(V)→0, -1(X)→1, 0(待定)→2, null→不覆盖（保持OA的jh）
-    let sysScoreMap = new Map<string, number | null>();
-    // 系统侧"新派发节点"映射：key = OA dt1.id → 系统内 due_date 最晚且 > 原 jd 的新节点
-    // OA 后续不回写（只读），重派后产生的新节点全在 hyzs_action_items（source_type='gsmalt'，
-    // originalId=同一个 OA dt1.id，可能有 1~N 条重派链），需要并入 newJd 计算。
+    //
+    // 同一 dt1.id 在系统侧可能有多行（重派链：原 X 项 + 后续重派新项）。
+    // 合并规则按稽核"最严重"优先级：-1(X 未完成) > 0(待定) > 1(V 已完成) > null(未稽核)。
+    // 任一条是 X，整 dt1 视为 X——否则会被重派新项的 pending/null 覆盖回未稽核，丢失"未达成KPI"通报。
+    // OA 后续不回写（只读），重派后产生的新节点全在 hyzs_action_items，需要并入 newJd 计算。
+    const SCORE_PRIORITY: Record<number, number> = { '-1': 4, '0': 3, '1': 2 }; // 数字越大越严重
+    let sysScoreMap = new Map<string, number>();
     let sysNewJdMap = new Map<string, string>();
     try {
       const sysPool = await import('@/storage/database/sqlserver-storage').then(m => m.getPool());
@@ -102,10 +105,16 @@ export async function GET(request: NextRequest) {
         const oid = String(row.original_id);
         const od = String(row.due_date).slice(0, 10);
         if (!oid || !od) continue;
-        // 同一 dt1.id 可能有多行（重派链），取 due_date 最晚
-        const cur = sysNewJdMap.get(oid);
-        if (!cur || od > cur) sysNewJdMap.set(oid, od);
-        sysScoreMap.set(oid, row.oa_score === null ? null : Number(row.oa_score));
+        // 新节点：同一 dt1.id 取 due_date 最晚
+        const curJd = sysNewJdMap.get(oid);
+        if (!curJd || od > curJd) sysNewJdMap.set(oid, od);
+        // 稽核合并：按 -1 > 0 > 1 > null 优先级保留最严重
+        if (row.oa_score === null || row.oa_score === undefined) continue;
+        const nScore = Number(row.oa_score);
+        const cur = sysScoreMap.get(oid);
+        if (cur === undefined || (SCORE_PRIORITY[nScore] ?? 0) > (SCORE_PRIORITY[cur] ?? 0)) {
+          sysScoreMap.set(oid, nScore);
+        }
       }
     } catch (e) {
       console.warn('[gsmalt] 系统打分覆盖查询失败（跳过覆盖）:', e instanceof Error ? e.message : e);
@@ -119,15 +128,14 @@ export async function GET(request: NextRequest) {
         ? null
         : Number(r.audit);
 
-      // 系统打分覆盖：系统已打分则优先
+      // 系统打分覆盖：系统已打分则优先（值类型已限定为 number，null 不入库）
       //   系统 1(V) → audit 0, 系统 -1(X) → audit 1, 系统 0(圈0待定) → audit 2
       const dt1Id = String(r.dt1Id || '');
       const sysScore = sysScoreMap.get(dt1Id);
-      if (sysScore !== undefined && sysScore !== null) {
-        const nScore = Number(sysScore);
-        if (nScore === 1) audit = 0;
-        else if (nScore === -1) audit = 1;
-        else if (nScore === 0) audit = 2;
+      if (sysScore !== undefined) {
+        if (sysScore === 1) audit = 0;
+        else if (sysScore === -1) audit = 1;
+        else if (sysScore === 0) audit = 2;
       }
 
       let newJd: string | null = null;

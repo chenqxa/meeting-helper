@@ -105,6 +105,9 @@ export function BoardPermissionPanel() {
           body: JSON.stringify({ loginid: selectedLoginid, boardKey: key, allowed }),
         });
       }
+      // 广播权限变更事件：dashboard-layout 收到后会清掉 sessionStorage 的 auth_perms 并立即重拉，
+      // 受影响用户的侧栏菜单会立刻出现/消失（无需重新登录、清浏览器缓存）。
+      window.dispatchEvent(new CustomEvent('permissions-changed', { detail: { loginid: selectedLoginid } }));
       setMsg('已保存');
       await load();
     } catch {
@@ -122,6 +125,7 @@ export function BoardPermissionPanel() {
         setSelectedName('');
         setDraft({});
       }
+      window.dispatchEvent(new CustomEvent('permissions-changed', { detail: { loginid } }));
       await load();
       setMsg('已清除（恢复角色默认）');
     } catch {

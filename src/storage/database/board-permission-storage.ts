@@ -19,6 +19,8 @@ const PERM_KEY_MAP: Record<BoardKey, string> = {
   monthly: 'canViewMonthlyBoard',
   production: 'canViewProductionBoard',
 };
+// 暴露给外部（/api/permissions/mine 用，避免硬编码重复）
+export const BOARD_KEY_TO_PERM = PERM_KEY_MAP;
 
 let pool: sql.ConnectionPool | null = null;
 

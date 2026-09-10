@@ -233,6 +233,26 @@ export default function DashboardLayout({ children }: LayoutProps) {
       .catch(() => {});
   }, []);
 
+  // 权限变更广播：管理员在 /org/board-permission-panel 改了人员级看板权限后
+  // 会派发 'permissions-changed' 事件 → 清掉 sessionStorage 缓存并立即重拉，
+  // 侧栏菜单（看板入口等）即时出现/消失，不必重新登录或清浏览器缓存。
+  useEffect(() => {
+    const onPermChanged = () => {
+      sessionStorage.removeItem('auth_perms');
+      fetch('/api/permissions/mine')
+        .then(r => r.json())
+        .then(d => {
+          if (d.success && Array.isArray(d.data?.permissions)) {
+            setUserPerms(new Set(d.data.permissions as string[]));
+            sessionStorage.setItem('auth_perms', JSON.stringify(d.data.permissions));
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('permissions-changed', onPermChanged);
+    return () => window.removeEventListener('permissions-changed', onPermChanged);
+  }, []);
+
   const handleLogout = async () => {
     sessionStorage.removeItem('auth_me');
     await fetch('/api/auth/logout', { method: 'POST' });

@@ -89,13 +89,23 @@ export async function GET(request: NextRequest) {
     // key = originalId（OA dt1.id）→ { oa_score }
     // 系统打分 → audit 映射：1(V)→0, -1(X)→1, 0(待定)→2, null→不覆盖（保持OA的jh）
     let sysScoreMap = new Map<string, number | null>();
+    // 系统侧"新派发节点"映射：key = OA dt1.id → 系统内 due_date 最晚且 > 原 jd 的新节点
+    // OA 后续不回写（只读），重派后产生的新节点全在 hyzs_action_items（source_type='gsmalt'，
+    // originalId=同一个 OA dt1.id，可能有 1~N 条重派链），需要并入 newJd 计算。
+    let sysNewJdMap = new Map<string, string>();
     try {
       const sysPool = await import('@/storage/database/sqlserver-storage').then(m => m.getPool());
       const sysRes = await sysPool.request().query(`
-        SELECT original_id, oa_score FROM hyzs_action_items
-        WHERE source_type = 'gsmalt' AND original_id IS NOT NULL`);
+        SELECT original_id, oa_score, due_date FROM hyzs_action_items
+        WHERE source_type = 'gsmalt' AND original_id IS NOT NULL AND due_date IS NOT NULL`);
       for (const row of sysRes.recordset) {
-        sysScoreMap.set(String(row.original_id), row.oa_score === null ? null : Number(row.oa_score));
+        const oid = String(row.original_id);
+        const od = String(row.due_date).slice(0, 10);
+        if (!oid || !od) continue;
+        // 同一 dt1.id 可能有多行（重派链），取 due_date 最晚
+        const cur = sysNewJdMap.get(oid);
+        if (!cur || od > cur) sysNewJdMap.set(oid, od);
+        sysScoreMap.set(oid, row.oa_score === null ? null : Number(row.oa_score));
       }
     } catch (e) {
       console.warn('[gsmalt] 系统打分覆盖查询失败（跳过覆盖）:', e instanceof Error ? e.message : e);
@@ -122,8 +132,15 @@ export async function GET(request: NextRequest) {
 
       let newJd: string | null = null;
       if (Number(audit) === 1) {
+        // 候选 1：OA 主表里同 KPI+责任人+原因分析的最大 jd（历史遗留场景）
         const maxJd = maxMap.get(keyOf(r.kpiId, r.zrr, r.yyfx)) || '';
-        if (maxJd && maxJd > jd) newJd = maxJd;
+        // 候选 2：系统侧同一 dt1.id 的最晚 due_date（重派后产生的，OA 不回写）
+        const sysJd = sysNewJdMap.get(dt1Id) || '';
+        // 取两者中更晚且 > 原 jd 的
+        let best: string | null = null;
+        if (maxJd && maxJd > jd) best = maxJd;
+        if (sysJd && sysJd > jd && (!best || sysJd > best)) best = sysJd;
+        newJd = best;
       }
       return {
         dt1Id: dt1Id || null, // OA uf_GSMALT_dt1.id（用于前端关联系统内 source_type='gsmalt' 的行动项）

@@ -36,6 +36,7 @@ oa-keys.txt
 cookies.txt
 *.pem
 *.key
+scripts/EntranceHyzs.jsp
 
 # 数据备份与临时脚本
 *-backup-*.json

@@ -16,8 +16,8 @@ String loginid = user.getLoginid();
 // 会议助手 SSO 回调地址（如有内网地址可换）
 String targetUrl = "https://hjoa.chinahy-soft.com:15815/api/auth/weaver/callback?redirect=/";
 
-// 必须与会议助手 .env 中 WEAVER_SSO_HMAC_SECRET 完全一致
-String secret = "REDACTED_WEAVER_SSO_HMAC_SECRET";
+// 必须与会议助手 .env 中 WEAVER_SSO_HMAC_SECRET 完全一致（部署时填入真实值，切勿提交）
+String secret = "<在此填入与 .env WEAVER_SSO_HMAC_SECRET 一致的值>";
 long ts = System.currentTimeMillis();
 String data = loginid + "|" + ts;
 String sign = "";

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getMeetings, updateMeeting, getActionItemById, updateActionItem } from '@/storage';
 import { verifyCallbackToken } from '@/lib/oa-task-push';
-import { autoDetectStatus } from '@/lib/action-status';
+import { autoDetectStatus, isAutoDetectEnabled } from '@/lib/action-status';
 
 // POST /api/oa/callback
 // OA 责任人填写结果后回传
@@ -29,6 +29,8 @@ export async function POST(request: NextRequest) {
     };
     const explicitStatus = oaStatusMap[status || ''] || undefined;
     const { status: mappedStatus, score, autoDetected } = autoDetectStatus(result_remark || '', explicitStatus);
+    // 仅当 OA 明确回传了状态、或自动判分开关开启时才写状态/分数；否则只写回传内容（不靠文字猜分）
+    const writeStatusScore = !!explicitStatus || isAutoDetectEnabled();
     const now = new Date().toISOString();
 
     // task_id 格式：meetingId__itemId（新格式）或旧格式 itemId
@@ -50,18 +52,18 @@ export async function POST(request: NextRequest) {
 
     if (ledgerItem) {
       const patch: Record<string, any> = {
-        status: mappedStatus as any,
         oaResult: result_remark || '',
         oaResultAt: now,
-        oaScore: score,
-        oaAutoDetected: autoDetected,
         oaAttachments: Array.isArray(attachments) ? attachments : (attachments ? [attachments] : undefined),
+        ...(writeStatusScore
+          ? { status: mappedStatus as any, oaScore: score, oaAutoDetected: autoDetected }
+          : {}),
       };
-      if (mappedStatus === 'done') {
+      if (writeStatusScore && mappedStatus === 'done') {
         patch.completedBy = operator_name || operator_loginid || 'OA';
         patch.completedAt = now;
       }
-      if (mappedStatus === 'blocked') {
+      if (writeStatusScore && mappedStatus === 'blocked') {
         patch.blockReason = result_remark || '来自OA回传';
       }
       await updateActionItem(ledgerItem.id, patch);
@@ -80,16 +82,20 @@ export async function POST(request: NextRequest) {
           if (idx === -1) continue;
           items[idx] = {
             ...items[idx],
-            status: mappedStatus,
             oa_result: result_remark || '',
             oa_result_at: now,
-            oa_score: score,
-            oa_auto_detected: autoDetected,
             oa_attachments: Array.isArray(attachments) ? attachments : (attachments ? [attachments] : undefined),
-            completed_by: mappedStatus === 'done' ? (operator_name || operator_loginid || 'OA') : items[idx].completed_by,
-            completed_at: mappedStatus === 'done' ? now : items[idx].completed_at,
+            ...(writeStatusScore
+              ? {
+                  status: mappedStatus,
+                  oa_score: score,
+                  oa_auto_detected: autoDetected,
+                  completed_by: mappedStatus === 'done' ? (operator_name || operator_loginid || 'OA') : items[idx].completed_by,
+                  completed_at: mappedStatus === 'done' ? now : items[idx].completed_at,
+                  block_reason: mappedStatus === 'blocked' ? (result_remark || '来自OA回传') : items[idx].block_reason,
+                }
+              : {}),
             completion_note: result_remark || items[idx].completion_note,
-            block_reason: mappedStatus === 'blocked' ? (result_remark || '来自OA回传') : items[idx].block_reason,
           };
           await updateMeeting(meeting.id, { actionItems: items });
           foundMeetingTitle = meeting.title;
@@ -112,16 +118,20 @@ export async function POST(request: NextRequest) {
 
       items[idx] = {
         ...items[idx],
-        status: mappedStatus,
         oa_result: result_remark || '',
         oa_result_at: now,
-        oa_score: score,
-        oa_auto_detected: autoDetected,
         oa_attachments: Array.isArray(attachments) ? attachments : (attachments ? [attachments] : undefined),
-        completed_by: mappedStatus === 'done' ? (operator_name || operator_loginid || 'OA') : items[idx].completed_by,
-        completed_at: mappedStatus === 'done' ? now : items[idx].completed_at,
+        ...(writeStatusScore
+          ? {
+              status: mappedStatus,
+              oa_score: score,
+              oa_auto_detected: autoDetected,
+              completed_by: mappedStatus === 'done' ? (operator_name || operator_loginid || 'OA') : items[idx].completed_by,
+              completed_at: mappedStatus === 'done' ? now : items[idx].completed_at,
+              block_reason: mappedStatus === 'blocked' ? (result_remark || '来自OA回传') : items[idx].block_reason,
+            }
+          : {}),
         completion_note: result_remark || items[idx].completion_note,
-        block_reason: mappedStatus === 'blocked' ? (result_remark || '来自OA回传') : items[idx].block_reason,
       };
 
       await updateMeeting(meeting.id, { actionItems: items });

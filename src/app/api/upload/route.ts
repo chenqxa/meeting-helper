@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateFile, generateSafeFilename } from '@/lib/file-validator';
+import { validateFile, generateSafeFilename, sanitizeExt, detectMimeFromBuffer, generateSafeFilenameAny, isDangerousMime } from '@/lib/file-validator';
 import { saveFileToDb } from '@/storage/database/file-storage';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -9,13 +9,15 @@ const FILE_TYPE_MIME_MAP: Record<string, string> = {
   'recording': 'audio/mpeg', // 录音文件主要支持MP3
   'upload': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'image': 'image/jpeg',
+  'file': 'application/octet-stream',
 };
 
-// 支持的MIME类型（可扩展）
+// 支持的MIME类型（'file' 为空数组 = 不限制类型，任意文件）
 const SUPPORTED_MIME_TYPES: Record<string, string[]> = {
   'recording': ['audio/mpeg', 'audio/wav', 'audio/m4a'],
   'upload': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'],
   'image': ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+  'file': [],
 };
 
 export async function POST(request: NextRequest) {
@@ -54,6 +56,40 @@ export async function POST(request: NextRequest) {
         { success: false, error: '文件内容为空' },
         { status: 400 }
       );
+    }
+
+    // ── 通用文件（type=file）：不限制类型，放开任意格式 ──
+    if (fileType === 'file') {
+      const ext = sanitizeExt(file.name);
+      if (!ext) {
+        return NextResponse.json({ success: false, error: '文件缺少有效扩展名' }, { status: 400 });
+      }
+      const buffer = Buffer.from(await file.arrayBuffer());
+      if (buffer.length < 10) {
+        return NextResponse.json({ success: false, error: '文件内容为空' }, { status: 400 });
+      }
+      const mime = detectMimeFromBuffer(buffer, ext, file.type || FILE_TYPE_MIME_MAP['file']);
+      const safeFilename = generateSafeFilenameAny(file.name);
+      const uploadDir = process.env.UPLOAD_DIR || path.join(process.cwd(), '.uploads');
+      const filePath = path.join(uploadDir, safeFilename);
+      await fs.mkdir(uploadDir, { recursive: true });
+      try {
+        await saveFileToDb(safeFilename, mime, buffer);
+      } catch (dbErr) {
+        console.error('[upload] 附件入库失败（将继续落盘）:', dbErr instanceof Error ? dbErr.message : dbErr);
+      }
+      await fs.writeFile(filePath, buffer).catch(diskErr => {
+        console.warn('[upload] 附件写盘失败（不影响，库里已有）:', diskErr instanceof Error ? diskErr.message : diskErr);
+      });
+      return NextResponse.json({
+        success: true,
+        url: `/api/files/${safeFilename}`,
+        fileId: safeFilename,
+        filename: file.name,
+        size: file.size,
+        type: mime,
+        dangerous: isDangerousMime(mime, ext),
+      });
     }
 
     // 确定期望的MIME类型

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getActionItemById, getActionItemByMeetingAndOriginalId, updateActionItem, getMeetingById, updateMeeting, getTaskBatchById, getAllActionItems, getMeetings, createActionItem } from '@/storage';
 import { resolveActionOwnerIdentity, resolveDeptByName } from '@/lib/action-owner';
-import { autoDetectStatus } from '@/lib/action-status';
+import { autoDetectStatus, isAutoDetectEnabled } from '@/lib/action-status';
 import { logOperation } from '@/lib/operation-log';
 import { getAppPool, pushMeetingTasksToOA } from '@/lib/oa-task-push';
 import { rescheduleActionItem } from '@/lib/oa-pull-runner';
@@ -9,6 +9,7 @@ import { upsertContinuousProgress } from '@/storage/database/continuous-progress
 import { updateActionAutoFetch } from '@/storage/database/action-storage';
 import { firstAutoFetchSourceKey } from '@/lib/auto-fetch-sources-meta';
 import { guardWrite } from '@/lib/api-guard';
+import { hasPermission } from '@/lib/roles';
 import { getCurrentUser } from '@/lib/session';
 
 // 按月开的会（产销会/公司月会）：看的是上月数据 → 填报归属「最近一次已开完同类会议」所在月份
@@ -138,16 +139,25 @@ export async function PUT(
       'owner', 'ownerLoginId', 'ownerOaId', 'dept',
       'proposer', 'proposerLoginId', 'proposerOaId', 'proposer_dept',
       'description', 'due_date', 'dueDate', 'due_date_type', 'priority',
-      'auto_fetch',
+      'auto_fetch', 'auto_fetch_source', 'auto_fetch_params',
     ];
     const SELF_REPORT_STATUSES = ['in_progress', 'done', 'blocked'];
     // tbd（自动转派）任务：责任人允许带 due_date/due_date_type 填节点（可只设日期不做汇报）
     let tbdSelfDueDate: string | null = null;
-    if (existing.dueDateType === 'tbd' && body.due_date !== undefined) {
-      tbdSelfDueDate = String(body.due_date).slice(0, 10) || null;
-      delete body.due_date;
-      delete body.dueDate;
-      delete body.due_date_type;
+    // 仅"tbd 项补填非空日期"时走此自愈：显式改类型（如 continuous/date）或日期为空时不得拦截，
+    // 否则会把「tbd → 持续项」（due_date=''、due_date_type='continuous'）误吞，导致类型仍停在 tbd
+    if (
+      existing.dueDateType === 'tbd' &&
+      body.due_date !== undefined &&
+      (body.due_date_type === undefined || body.due_date_type === 'tbd')
+    ) {
+      const tbdDate = String(body.due_date).slice(0, 10).trim();
+      if (tbdDate) {
+        tbdSelfDueDate = tbdDate;
+        delete body.due_date;
+        delete body.dueDate;
+        delete body.due_date_type;
+      }
     }
     const hasAdminOnlyFields = FORBIDDEN_KEYS.some(k => k in body);
     const statusOk = body.status === undefined || SELF_REPORT_STATUSES.includes(body.status);
@@ -169,7 +179,22 @@ export async function PUT(
 
     if (!isSelfReportFinal) {
       const guard = await guardWrite('admin');
-      if (!guard.ok) return guard.response;
+      if (!guard.ok) {
+        // 非 admin：允许 canEditActionOwner（admin/manager）或「未归档会议的创建人（主持人）」
+        const user = await getCurrentUser();
+        let allowed = false;
+        if (user) allowed = await hasPermission(user.loginid, 'canEditActionOwner');
+        if (!allowed && user && existing.meetingId) {
+          try {
+            const meeting = await getMeetingById(existing.meetingId);
+            allowed = !!meeting
+              && (meeting as any).status !== 'locked'
+              && ((meeting as any).organizerLoginId === user.loginid
+                || (meeting as any).organizer === user.name);
+          } catch { /* ignore */ }
+        }
+        if (!allowed) return guard.response;
+      }
     }
 
     // 持续项「自动取数」标记 + 绑定取数源：仅 admin（已在 FORBIDDEN_KEYS 兜底）；独立轻量更新后直接返回
@@ -179,8 +204,10 @@ export async function PUT(
       if (enabled && !sourceKey) {
         return NextResponse.json({ success: false, error: '尚未配置任何自动取数源，无法开启' }, { status: 400 });
       }
-      await updateActionAutoFetch(targetActionId, enabled, sourceKey);
-      return NextResponse.json({ success: true, data: { id: targetActionId, auto_fetch: enabled ? 1 : 0, auto_fetch_source: sourceKey } });
+      const params: Record<string, unknown> | null = enabled && body.auto_fetch_params && typeof body.auto_fetch_params === 'object'
+        ? body.auto_fetch_params : null;
+      await updateActionAutoFetch(targetActionId, enabled, sourceKey, params);
+      return NextResponse.json({ success: true, data: { id: targetActionId, auto_fetch: enabled ? 1 : 0, auto_fetch_source: sourceKey, auto_fetch_params: params } });
     }
 
     // tbd 只设日期（轻量路径）：不做汇报、不触发通知/重派/日志等副作用
@@ -268,8 +295,8 @@ export async function PUT(
       else delete patch.oaScore;
     }
 
-    // 从汇报文本自动判定：文字写了"已完成"但状态选的"未完成"→ 自动纠正为 done
-    if (patch.oaResult && body.status !== 'done' && body.status !== 'blocked' && patch.oaScore == null) {
+    // 从汇报文本自动判定（默认关闭，需 AUTO_DETECT_STATUS_ENABLED=true 才启用）：文字写了"完成"自动纠正为 done
+    if (isAutoDetectEnabled() && patch.oaResult && body.status !== 'done' && body.status !== 'blocked' && patch.oaScore == null) {
       const detected = autoDetectStatus(patch.oaResult);
       if (detected.autoDetected && detected.status === 'done') {
         patch.status = 'done' as any;
@@ -277,6 +304,18 @@ export async function PUT(
         patch.completedAt = now;
         patch.oaScore = detected.score;
         patch.oaAutoDetected = true;
+      }
+    }
+
+    // 持续项：责任人自报进展只记文字，不参与 V/X 稽核（管理员手动稽核不受此限）
+    if (existing.dueDateType === 'continuous' && isSelfReportFinal) {
+      const isAuditor = currentUser ? await hasPermission(currentUser.loginid, 'canAudit') : false;
+      if (!isAuditor) {
+        patch.status = 'in_progress';
+        patch.oaScore = null;
+        patch.oaAutoDetected = false;
+        patch.completedAt = null;
+        patch.completedBy = null;
       }
     }
 
@@ -292,8 +331,9 @@ export async function PUT(
       }
     }
 
-    // ── 完成闭环通知：首次标记"已完成"时异步通知提出人（企微卡片，不阻塞提交）──
-    if (body.status === 'done' && existing.status !== 'done') {
+    // ── 完成闭环通知：首次标记"已完成"时异步通知提出人（企微卡片，不阻塞提交）；持续项无"完成"语义，不发 ──
+    if (body.status === 'done' && existing.status !== 'done'
+        && existing.dueDateType !== 'continuous' && updated?.dueDateType !== 'continuous') {
       void import('@/lib/wecom-action-push').then(m =>
         m.notifyProposerOnComplete({
           actionId: targetActionId,
@@ -458,6 +498,8 @@ export async function PUT(
             proposerOaId: updated.proposerOaId,
             dueDate: updated.dueDate,
             due_date: updated.dueDate,
+            due_date_type: updated.dueDateType,
+            dueDateType: updated.dueDateType,
             priority: updated.priority,
             confirmed_by: updated.confirmedBy,
             confirmed_at: updated.confirmedAt,

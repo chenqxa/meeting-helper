@@ -5,6 +5,8 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { getActionDisplayLabel, getActionDisplayStatus } from '@/lib/action-status';
 import { getDisplayOaResult } from '@/lib/oa-result-display';
 import DashboardLayout from '@/components/layout/dashboard-layout';
+import { ImagePreview } from '@/components/ui/image-preview';
+import { FilePreview } from '@/components/ui/file-preview';
 import {
   FolderOpen, FileText, Users, Calendar, CheckSquare,
   AlertTriangle, ChevronLeft, Plus, Edit2, Check, X,
@@ -260,6 +262,9 @@ export default function ProjectPage() {
   const [resultForm, setResultForm] = useState({ text: '', status: 'done' });
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
+  const [selPreviewOpen, setSelPreviewOpen] = useState(false);
+  const [selPreviewIdx, setSelPreviewIdx] = useState(0);
+  const [selFilePreview, setSelFilePreview] = useState<File | null>(null);
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [pushPreviewOpen, setPushPreviewOpen] = useState(false);
   const [pushPreviewLoading, setPushPreviewLoading] = useState(false);
@@ -455,7 +460,7 @@ export default function ProjectPage() {
       const files = Array.from(e.clipboardData?.items || []).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter((f): f is File => f !== null);
       if (files.length > 0) {
         e.preventDefault();
-        setResultImages(prev => [...prev, ...files.filter(f => f.type.startsWith('image/'))]);
+        setResultImages(prev => [...prev, ...files]);
       }
     };
     document.addEventListener('paste', handlePaste);
@@ -1919,36 +1924,54 @@ export default function ProjectPage() {
                   onDragOver={e => e.preventDefault()}
                   onDrop={e => {
                     e.preventDefault();
-                    const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/'));
+                    const files = Array.from(e.dataTransfer.files);
                     setResultImages(prev => [...prev, ...files]);
                   }}
                 >
                   <input
                     id="project-action-img-upload"
                     type="file"
-                    accept="image/*"
                     multiple
                     className="hidden"
                     onChange={e => setResultImages(prev => [...prev, ...Array.from(e.target.files || [])])}
                   />
-                  <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
-                  <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
+                  <div className="text-2xl mb-1">📎</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽文件 / <b>Ctrl+V 粘贴截图</b></div>
+                  <div className="text-[10px] text-slate-300 mt-0.5">支持 图片 · Word · Excel · PDF 等任意格式（单文件 ≤50MB）</div>
                 </div>
                 {resultImages.length > 0 && (
                   <div className="mt-3 grid grid-cols-4 gap-2">
-                    {resultImages.map((file, index) => (
-                      <div key={`${file.name}-${index}`} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group">
-                        <img src={URL.createObjectURL(file)} alt="" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all" />
-                        <button
-                          onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== index))}
-                          className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
+                    {resultImages.map((file, index) => {
+                      const isImg = file.type.startsWith('image/');
+                      return (
+                        <div key={`${file.name}-${index}`} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group bg-slate-50">
+                          {isImg ? (
+                            <img
+                              src={URL.createObjectURL(file)}
+                              alt=""
+                              className="w-full h-full object-cover cursor-zoom-in"
+                              onClick={() => {
+                                const imgs = resultImages.filter(x => x.type.startsWith('image/'));
+                                setSelPreviewIdx(Math.max(0, imgs.indexOf(file)));
+                                setSelPreviewOpen(true);
+                              }}
+                            />
+                          ) : (
+                            <button type="button" onClick={() => setSelFilePreview(file)}
+                              className="w-full h-full flex flex-col items-center justify-center gap-1 px-1 text-center hover:bg-slate-100">
+                              <FileText className="w-5 h-5 text-slate-400" />
+                              <span className="text-[10px] text-slate-500 break-all" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{file.name}</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== index))}
+                            className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
                     <div
                       className="aspect-square rounded-lg border-2 border-dashed border-slate-200 flex items-center justify-center cursor-pointer hover:border-blue-300 hover:bg-blue-50/30 transition-all"
                       onClick={() => document.getElementById('project-action-img-upload')?.click()}
@@ -1991,7 +2014,7 @@ export default function ProjectPage() {
                     for (const file of resultImages) {
                       const fd = new FormData();
                       fd.append('file', file);
-                      fd.append('type', 'image');
+                      fd.append('type', file.type.startsWith('image/') ? 'image' : 'file');
                       const uploadResult = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
                       if (uploadResult.success) imageUrls.push(uploadResult.url);
                     }
@@ -2520,6 +2543,23 @@ export default function ProjectPage() {
             </div>
           </div>
         )}
+
+      {/* 已选附件预览（图片放大 / 文件在线预览） */}
+      <ImagePreview
+        images={resultImages.filter(f => f.type.startsWith('image/')).map(f => URL.createObjectURL(f))}
+        index={selPreviewIdx}
+        open={selPreviewOpen}
+        onClose={() => setSelPreviewOpen(false)}
+      />
+      {selFilePreview && (
+        <FilePreview
+          url={URL.createObjectURL(selFilePreview)}
+          filename={selFilePreview.name}
+          mime={selFilePreview.type}
+          open={!!selFilePreview}
+          onClose={() => setSelFilePreview(null)}
+        />
+      )}
 
       </div>
     </DashboardLayout>

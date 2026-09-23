@@ -27,6 +27,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // 已归档会议禁止重新生成（防止退回待确认 + 行动项被重建/错位）
+    if ((meeting as { status?: string }).status === 'locked') {
+      return NextResponse.json(
+        { success: false, error: '会议已归档，不能重新生成纪要；如需修改请先在会议详情页解锁' },
+        { status: 409 }
+      );
+    }
+
     const content = meeting.content;
     if (!content) {
       return NextResponse.json(

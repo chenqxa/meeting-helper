@@ -15,6 +15,13 @@ export async function POST(request: NextRequest) {
     const result = await runAutoFetch(undefined, {
       endDate: body && typeof body.weekEnd === 'string' && body.weekEnd.trim() ? body.weekEnd.trim() : undefined,
       dryRun: !!(body && body.dryRun),
+      only: body && typeof body.actionId === 'string' && body.actionId.trim()
+        ? {
+            actionId: body.actionId.trim(),
+            source: typeof body.source === 'string' ? body.source : undefined,
+            params: body.params && typeof body.params === 'object' ? body.params : null,
+          }
+        : undefined,
     });
     return NextResponse.json({ success: true, data: result });
   } catch (error) {

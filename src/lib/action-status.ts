@@ -18,12 +18,22 @@ const DONE_KEYWORDS = ['完成', '已完', '通过', '完毕', '达成', '落实
 const FAIL_KEYWORDS = ['未完成', '无法', '取消', '放弃', '阻塞', '超期', '拒绝', '不通过', '失败', '暂停'];
 const PROGRESS_KEYWORDS = ['进行中', '部分完成', '延期', '推迟', '正在', '跟进中'];
 
+// 是否启用「按汇报文字自动判分」。默认关闭；设 AUTO_DETECT_STATUS_ENABLED=true 可恢复旧行为。
+export function isAutoDetectEnabled(): boolean {
+  return process.env.AUTO_DETECT_STATUS_ENABLED === 'true';
+}
+
 export function autoDetectStatus(
   resultText: string,
   explicitStatus?: string,
 ): { status: string; score: number; autoDetected: boolean } {
   if (explicitStatus === 'done') return { status: 'done', score: 1, autoDetected: false };
   if (explicitStatus === 'blocked') return { status: 'blocked', score: -1, autoDetected: false };
+
+  // 开关关闭：纯文本不参与判定，一律归为「进行中、无分」
+  if (!isAutoDetectEnabled()) {
+    return { status: 'in_progress', score: 0, autoDetected: false };
+  }
 
   const text = (resultText || '').toLowerCase();
   for (const kw of FAIL_KEYWORDS) {

@@ -22,9 +22,6 @@ export async function GET() {
   const backupBase = wsBaseUrl.includes('dashscope-intl.aliyuncs.com')
     ? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime'
     : 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
-  // #region debug-point A:qwen-sign-config
-  await (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'A',location:'api/asr/tingwu-sign:5',msg:'[DEBUG] qwen sign config check',data:{hasApiKey:!!apiKey,hasDashscopeKey:!!process.env.DASHSCOPE_API_KEY,hasQwenApiKey:!!process.env.QWEN_API_KEY,hasAliyunAccessKey:!!process.env.ALIYUN_ACCESS_KEY_ID,model},ts:Date.now()})}).catch(()=>{})})();
-  // #endregion
 
   if (!apiKey) {
     return NextResponse.json(
@@ -35,9 +32,6 @@ export async function GET() {
 
   const wsUrl = `${wsBaseUrl}?model=${encodeURIComponent(model)}`;
   const backupWsUrl = `${backupBase}?model=${encodeURIComponent(model)}`;
-  // #region debug-point A:qwen-sign-success
-  await (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'A',location:'api/asr/tingwu-sign:14',msg:'[DEBUG] qwen sign config ready',data:{wsUrl},ts:Date.now()})}).catch(()=>{})})();
-  // #endregion
 
   return NextResponse.json({ success: true, wsUrl, backupWsUrl, apiKey });
 }

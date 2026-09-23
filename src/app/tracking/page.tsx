@@ -2,13 +2,15 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import DashboardLayout from '@/components/layout/dashboard-layout';
-import { RefreshCw, Search, Download, CheckCircle2, XCircle, Clock, AlertTriangle, ChevronDown, ChevronUp, ExternalLink, Calculator, FileText, X, ShieldAlert, User, Sparkles, Presentation, Upload, Filter, ArrowUpRight } from 'lucide-react';
+import { RefreshCw, Search, Download, CheckCircle2, XCircle, Clock, AlertTriangle, ChevronDown, ChevronUp, ExternalLink, FileText, X, ShieldAlert, User, Presentation, Upload, Filter, ArrowUpRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import { getActionDisplayLabel, getActionDisplayStatus } from '@/lib/action-status';
 import { getDisplayOaResult } from '@/lib/oa-result-display';
 import { DeptSelect } from '@/components/ui/dept-select';
+import { ImagePreview } from '@/components/ui/image-preview';
+import { FilePreview } from '@/components/ui/file-preview';
 
 interface TrackItem {
   id: string;
@@ -33,6 +35,7 @@ interface TrackItem {
   oa_score: number | null;
   oa_auto_detected: boolean;
   oa_attachments?: string[];
+  before_photos?: string[];
   completed_at: string | null;
   block_reason: string | null;
 }
@@ -258,6 +261,7 @@ export default function TrackingPage() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   });
   const [expandedResult, setExpandedResult] = useState<string | null>(null);
+  const [expandedDesc, setExpandedDesc] = useState<string | null>(null);
 
   // 分页状态（已改为全量显示，不再分页）
   const [sortKey, setSortKey] = useState<'week' | 'due_date' | 'score'>('week');
@@ -283,8 +287,10 @@ export default function TrackingPage() {
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultSubmitting, setResultSubmitting] = useState(false);
   const [resultImages, setResultImages] = useState<File[]>([]);
-  const [settleMsg, setSettleMsg] = useState('');
-  const [oaSyncing, setOaSyncing] = useState(false);
+  const [selPreviewOpen, setSelPreviewOpen] = useState(false);
+  const [selPreviewIdx, setSelPreviewIdx] = useState(0);
+  const [selFilePreview, setSelFilePreview] = useState<File | null>(null);
+  const [attachFilePreview, setAttachFilePreview] = useState<{ url: string; name: string } | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState('');
   const [currentUserLoginId, setCurrentUserLoginId] = useState('');
@@ -349,7 +355,7 @@ export default function TrackingPage() {
       const files = Array.from(e.clipboardData?.items || []).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter((f): f is File => f !== null);
       if (files.length > 0) {
         e.preventDefault();
-        setResultImages(prev => [...prev, ...files.filter(f => f.type.startsWith('image/'))]);
+        setResultImages(prev => [...prev, ...files]);
       }
     };
     document.addEventListener('paste', handlePaste);
@@ -390,6 +396,15 @@ export default function TrackingPage() {
   };
 
   const importFileRef = useRef<HTMLInputElement>(null);
+  const [canBatchImport, setCanBatchImport] = useState(false);
+
+  // 导入权限：仅具备 canBatchImport 的用户可见导入入口
+  useEffect(() => {
+    fetch('/api/permissions/mine')
+      .then(r => r.json())
+      .then(d => { if (d.success) setCanBatchImport((d.data.permissions || []).includes('canBatchImport')); })
+      .catch(() => {});
+  }, []);
   const [importing, setImporting] = useState(false);
 
   const importExcel = async (file: File) => {
@@ -523,15 +538,7 @@ export default function TrackingPage() {
 
   useEffect(() => {
     if (userRole === null) return; // 等待角色加载完成
-    // 先立即加载台账，不等待 OA 同步
     load();
-    if (userRole === 'admin' || userRole === 'manager') {
-      // 后台并行拉取 OA 完成结果，同步有更新时再刷新
-      fetch('/api/oa/pull-results', { method: 'POST' })
-        .then(r => r.json())
-        .then(r => { if (r.success && r.data?.synced > 0) load(); })
-        .catch(() => { /* OA未连接时静默忽略 */ });
-    }
   }, [userRole, load]);
 
   const allYears = [...new Set(items.map(i => i.meeting_date?.slice(0, 4)).filter(Boolean))].sort().reverse();
@@ -543,10 +550,10 @@ export default function TrackingPage() {
   const allOwners = [...new Set(items.map(i => i.owner).filter(Boolean))].sort() as string[];
 
   const filtered = items.filter(i => {
+    // 完成通知卡片聚焦模式：只显示该条，且不套用任何其它筛选（含默认日期窗口），确保点通知必定可见
+    if (focusId) return i.id === focusId || (i as any).dbId === focusId;
     // 持续项不显示在行动项台账（另有「持续项跟进」页面）
     if (i.due_date_type === 'continuous') return false;
-    // 完成通知卡片聚焦模式：只显示该条（最后判断，优先级最高）
-    if (focusId && i.id !== focusId && (i as any).dbId !== focusId) return false;
     // 员工仅看自己相关的行动项（责任人=我 或 提出人=我）
     if (userRole === 'employee' || userRole === 'secretary') {
       const isOwner = i.owner !== undefined && (i.owner === currentUserName || i.owner === currentUserLoginId);
@@ -793,6 +800,7 @@ export default function TrackingPage() {
           <X className="w-3.5 h-3.5" /> 清除筛选
         </button>
         <div className="flex-1" />
+        {canBatchImport && (<>
         <input ref={importFileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
           onChange={e => { const f = e.target.files?.[0]; if (f) importExcel(f); e.target.value = ''; }} />
         <button
@@ -803,84 +811,16 @@ export default function TrackingPage() {
         >
           <Upload className={`w-3.5 h-3.5 ${importing ? 'animate-pulse' : ''}`} /> {importing ? '导入中...' : '导入Excel/CSV'}
         </button>
+        </>)}
         <button onClick={load} className="h-8 px-3 text-xs border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 flex items-center gap-1.5">
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
         </button>
         <Link href="/weekly-board" title="进入周例会看板演示" className="h-8 px-3 text-xs border border-indigo-200 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 flex items-center gap-1.5 font-medium">
           <Presentation className="w-3.5 h-3.5" /> 演示
         </Link>
-        {userRole === 'admin' && (
-          <button
-            disabled={oaSyncing}
-            onClick={async () => {
-              setOaSyncing(true);
-              try {
-                const r = await fetch('/api/oa/pull-results', { method: 'POST' }).then(r => r.json());
-                if (r.success) { setSettleMsg(r.data.message || '同步完成'); load(); setTimeout(() => setSettleMsg(''), 4000); }
-                else setSettleMsg(`同步失败: ${r.error}`);
-              } catch { setSettleMsg('同步失败，请检查OA连接'); }
-              finally { setOaSyncing(false); }
-            }}
-            className="h-8 px-3 text-xs border border-blue-200 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 flex items-center gap-1.5 disabled:opacity-50"
-            title="从泛微OA拉取完成结果说明（wcjgsm/wcqkfj）同步回台账"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${oaSyncing ? 'animate-spin' : ''}`} /> 同步OA结果
-          </button>
-        )}
-        {userRole === 'admin' && (
-          <button
-            onClick={async () => {
-              const r = await fetch('/api/actions/settle', { method: 'POST' }).then(r => r.json());
-              if (r.success) { setSettleMsg(`已结算 ${r.data.settled} 条超期未回传项`); load(); setTimeout(() => setSettleMsg(''), 4000); }
-            }}
-            className="h-8 px-3 text-xs border border-amber-200 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 flex items-center gap-1.5"
-            title="将超期且无OA回传的行动项自动写入 -1 分"
-          >
-            <Calculator className="w-3.5 h-3.5" /> 结算超期
-          </button>
-        )}
         <button onClick={exportCSV} className="h-8 px-3 text-xs border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 flex items-center gap-1.5">
           <Download className="w-3.5 h-3.5" /> 导出CSV
         </button>
-        <button
-          onClick={async () => {
-            if (!currentUserLoginId) {
-              alert('未获取到您的 OA 账号，无法推送。');
-              return;
-            }
-            setSettleMsg('正在尝试推送待办到 IM...');
-            try {
-              const res = await fetch('/api/chat/send-todo', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  oaUserId: currentUserLoginId,
-                  owner: currentUserName,
-                  ownerLoginId: currentUserLoginId,
-                  format: 'card'
-                })
-              });
-              const d = await res.json();
-              if (d.success) {
-                setSettleMsg('✅ 待办已推送到您的 IM');
-              } else {
-                setSettleMsg(`❌ 推送失败: ${d.error || '接口异常'}`);
-              }
-            } catch (e) {
-              setSettleMsg('❌ 推送请求发生错误');
-            }
-            setTimeout(() => setSettleMsg(''), 4000);
-          }}
-          className="h-8 px-3 text-xs border border-indigo-200 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 flex items-center gap-1.5"
-          title="将您个人的待办清单推送到 IM 自研对话系统进行验证"
-        >
-          <Sparkles className="w-3.5 h-3.5" /> 测试 IM 推送
-        </button>
-        {settleMsg && (
-          <span className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
-            <CheckCircle2 className="w-3.5 h-3.5" />{settleMsg}
-          </span>
-        )}
       </div>
 
       {/* 完成通知卡片聚焦提示条 */}
@@ -978,7 +918,13 @@ export default function TrackingPage() {
                     <td className="px-4 py-3 whitespace-nowrap text-slate-600">{formatDate(item.meeting_date)}</td>
                     <td className="px-4 py-3 whitespace-nowrap text-slate-600">{item.proposer || <span className="text-slate-300">待补充</span>}</td>
                     <td className="px-4 py-3 text-slate-800 max-w-[280px]">
-                      <div className="line-clamp-2" title={item.description}>{item.description}</div>
+                      <div className={`${expandedDesc === item.id ? '' : 'line-clamp-2'}`} title={item.description}>{item.description}</div>
+                      {item.description && item.description.length > 40 && (
+                        <button onClick={() => setExpandedDesc(expandedDesc === item.id ? null : item.id)}
+                          className="text-[10px] text-blue-500 hover:underline mt-0.5">
+                          {expandedDesc === item.id ? '收起' : '展开'}
+                        </button>
+                      )}
                       <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                         <span className="text-[10px] text-slate-400 truncate">📋 {item.meeting_title || item.meeting_type || '独立任务'}</span>
                         {item.meeting_id ? (
@@ -1074,37 +1020,63 @@ export default function TrackingPage() {
                     <td className="px-4 py-3 text-slate-600">
                       {(() => {
                         const displayResult = getDisplayOaResult(item.oa_result);
-                        return displayResult ? (
+                        const beforePhotos = Array.isArray(item.before_photos) ? item.before_photos : [];
+                        const reportAtts = Array.isArray(item.oa_attachments) ? item.oa_attachments : [];
+                        const hasBefore = beforePhotos.length > 0;
+                        const hasReport = reportAtts.length > 0;
+                        if (!displayResult && !hasBefore && !hasReport) {
+                          return <span className="text-slate-300 text-[11px]">待回传</span>;
+                        }
+                        const renderAtt = (url: string, i: number) => (
+                          /\.(jpe?g|png|gif|webp|bmp)$/i.test(url) ? (
+                            <img key={i} src={url} alt="" title="点击放大"
+                              className="w-9 h-9 rounded object-cover border border-slate-200 cursor-zoom-in hover:ring-2 hover:ring-blue-300"
+                              onClick={() => { if (url && url !== 'null') setPreviewUrl(url); }} />
+                          ) : (
+                            <button key={i} onClick={() => {
+                              if (!url || url === 'null') return;
+                              setAttachFilePreview({ url, name: decodeURIComponent(url.split('/').pop() || `附件${i + 1}`) });
+                            }}
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] border border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition-colors">
+                              <FileText className="w-3 h-3" /> 附件{i + 1}
+                            </button>
+                          )
+                        );
+                        return (
                           <div>
-                            <div className={`text-[11px] ${isExpanded ? '' : 'line-clamp-2'}`}>
-                              {displayResult}
-                            </div>
-                            {displayResult.length > 40 && (
-                              <button onClick={() => setExpandedResult(isExpanded ? null : item.id)}
-                                className="text-[10px] text-blue-500 hover:underline mt-0.5">
-                                {isExpanded ? '收起' : '展开'}
-                              </button>
+                            {hasBefore && (
+                              <div className={displayResult || hasReport ? 'mb-1.5' : ''}>
+                                <span className="text-[10px] text-rose-400">整改前</span>
+                                <div className="mt-0.5 flex gap-1 flex-wrap items-center">{beforePhotos.map(renderAtt)}</div>
+                              </div>
                             )}
-                            {item.oa_auto_detected && (
-                              <span className="text-[10px] text-amber-500 ml-1">🤖自动判定</span>
-                          )}
-                          {item.oa_attachments && item.oa_attachments.length > 0 && (
-                            <div className="mt-1.5 flex gap-1 flex-wrap">
-                              {item.oa_attachments.map((url, i) => (
-                                <button key={i} onClick={() => url && url !== 'null' && setPreviewUrl(url)}
-                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] border border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition-colors">
-                                  <FileText className="w-3 h-3" /> 附件{i + 1}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                          {item.oa_result_at && (
-                            <div className="text-[10px] text-slate-300 mt-0.5">{formatDate(item.oa_result_at)}</div>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-slate-300 text-[11px]">待回传</span>
-                      );
+                            {displayResult && (
+                              <>
+                                <div className={`text-[11px] ${isExpanded ? '' : 'line-clamp-2'}`} title={displayResult}>
+                                  {displayResult}
+                                </div>
+                                {displayResult.length > 40 && (
+                                  <button onClick={() => setExpandedResult(isExpanded ? null : item.id)}
+                                    className="text-[10px] text-blue-500 hover:underline mt-0.5">
+                                    {isExpanded ? '收起' : '展开'}
+                                  </button>
+                                )}
+                                {item.oa_auto_detected && (
+                                  <span className="text-[10px] text-amber-500 ml-1">🤖自动判定</span>
+                                )}
+                              </>
+                            )}
+                            {hasReport && (
+                              <div className="mt-1.5">
+                                <span className="text-[10px] text-slate-400">汇报附件</span>
+                                <div className="mt-0.5 flex gap-1 flex-wrap items-center">{reportAtts.map(renderAtt)}</div>
+                              </div>
+                            )}
+                            {item.oa_result_at && (
+                              <div className="text-[10px] text-slate-300 mt-0.5">{formatDate(item.oa_result_at)}</div>
+                            )}
+                          </div>
+                        );
                       })()}
                     </td>
                     {/* 操作列 — 仅 admin 显示（稽核/汇报/重派均为管理操作，普通角色整列隐藏） */}
@@ -1473,28 +1445,47 @@ export default function TrackingPage() {
                   onDragOver={e => { e.preventDefault(); }}
                   onDrop={e => {
                     e.preventDefault();
-                    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+                    const files = Array.from(e.dataTransfer.files);
                     setResultImages(prev => [...prev, ...files]);
                   }}
                 >
-                  <input id="result-img-upload" type="file" accept="image/*" multiple className="hidden"
+                  <input id="result-img-upload" type="file" multiple className="hidden"
                     onChange={e => { setResultImages(prev => [...prev, ...Array.from(e.target.files || [])]); }} />
-                  <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
-                  <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
+                  <div className="text-2xl mb-1">📎</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽文件 / <b>Ctrl+V 粘贴截图</b></div>
+                  <div className="text-[10px] text-slate-300 mt-0.5">支持 图片 · Word · Excel · PDF 等任意格式（单文件 ≤50MB）</div>
                 </div>
                 {resultImages.length > 0 && (
                   <div className="mt-3 grid grid-cols-4 gap-2">
-                    {resultImages.map((f, i) => (
-                      <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group">
-                        <img src={URL.createObjectURL(f)} alt="" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all" />
-                        <button
-                          onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== i))}
-                          className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition-opacity flex"
-                        ><X className="w-3 h-3" /></button>
-                      </div>
-                    ))}
+                    {resultImages.map((f, i) => {
+                      const isImg = f.type.startsWith('image/');
+                      return (
+                        <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group bg-slate-50">
+                          {isImg ? (
+                            <img
+                              src={URL.createObjectURL(f)}
+                              alt=""
+                              className="w-full h-full object-cover cursor-zoom-in"
+                              onClick={() => {
+                                const imgs = resultImages.filter(x => x.type.startsWith('image/'));
+                                setSelPreviewIdx(Math.max(0, imgs.indexOf(f)));
+                                setSelPreviewOpen(true);
+                              }}
+                            />
+                          ) : (
+                            <button type="button" onClick={() => setSelFilePreview(f)}
+                              className="w-full h-full flex flex-col items-center justify-center gap-1 px-1 text-center hover:bg-slate-100">
+                              <FileText className="w-5 h-5 text-slate-400" />
+                              <span className="text-[10px] text-slate-500 break-all" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{f.name}</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== i))}
+                            className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition-opacity flex"
+                          ><X className="w-3 h-3" /></button>
+                        </div>
+                      );
+                    })}
                     <div
                       className="aspect-square rounded-lg border-2 border-dashed border-slate-200 flex items-center justify-center cursor-pointer hover:border-blue-300 hover:bg-blue-50/30 transition-all"
                       onClick={() => document.getElementById('result-img-upload')?.click()}
@@ -1535,9 +1526,14 @@ export default function TrackingPage() {
                     for (const file of resultImages) {
                       const formData = new FormData();
                       formData.append('file', file);
-                      formData.append('type', 'image');
-                      const r = await fetch('/api/upload', { method: 'POST', body: formData }).then(res => res.json());
-                      if (r.success) imageUrls.push(r.url);
+                      formData.append('type', 'file');
+                      const up = await fetch('/api/upload', { method: 'POST', body: formData });
+                      const r: { success?: boolean; url?: string; error?: string } | null = await up.json().catch(() => null);
+                      if (!up.ok || !r?.success) {
+                        alert(`附件「${file.name}」上传失败：${r?.error || `HTTP ${up.status}`}\n请检查网络；照片过大时可压缩后重试`);
+                        return;
+                      }
+                      imageUrls.push(r.url!);
                     }
                     const res = await fetch(`/api/actions/${resultItem.id}`, {
                       method: 'PUT',
@@ -1557,6 +1553,12 @@ export default function TrackingPage() {
                       if (r?.rescheduledError) alert(`汇报已保存，但自动重派未执行：${r.rescheduledError}`);
                       setResultItem(null); load();
                     }
+                    else {
+                      const j = await res.json().catch(() => ({}));
+                      alert((j as any).error || `提交失败（${res.status}）`);
+                    }
+                  } catch (e) {
+                    alert(`提交异常：${e instanceof Error ? e.message : e}`);
                   } finally { setResultSubmitting(false); }
                 }}
                 disabled={resultSubmitting}
@@ -1578,6 +1580,31 @@ export default function TrackingPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 已选附件预览（图片放大 / 文件在线预览） */}
+      <ImagePreview
+        images={resultImages.filter(f => f.type.startsWith('image/')).map(f => URL.createObjectURL(f))}
+        index={selPreviewIdx}
+        open={selPreviewOpen}
+        onClose={() => setSelPreviewOpen(false)}
+      />
+      {selFilePreview && (
+        <FilePreview
+          url={URL.createObjectURL(selFilePreview)}
+          filename={selFilePreview.name}
+          mime={selFilePreview.type}
+          open={!!selFilePreview}
+          onClose={() => setSelFilePreview(null)}
+        />
+      )}
+      {attachFilePreview && (
+        <FilePreview
+          url={attachFilePreview.url}
+          filename={attachFilePreview.name}
+          open={!!attachFilePreview}
+          onClose={() => setAttachFilePreview(null)}
+        />
       )}
 
       {/* 附件预览弹窗 */}

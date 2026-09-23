@@ -521,7 +521,7 @@ function Metric({ label, value, unit, tone }: { label: string; value: string; un
 function ContinuousSlide({ items, mode, progressMap, periodText, onShowDetail }: {
   items: BoardItem[];
   mode: 'done' | 'pending';
-  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }>;
   periodText?: string; // 填报窗口展示（如 8/25~8/31）
   onShowDetail?: (pr: { progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null }) => void; // 自动取数明细点击（本周N张 → 弹表格）
 }) {
@@ -618,18 +618,23 @@ function ContinuousSlide({ items, mode, progressMap, periodText, onShowDetail }:
                           // progressMap 已按统计周期（上周二~本周一）过滤：周期内有填报才显示，否则视为本周期未填报
                           const pr = progressMap?.[it.id];
                           if (pr?.progress) {
-                            // 自动取数：格子只显示简短汇总，点击弹明细表格
+                            // 自动取数：格子只显示简短汇总，点击弹明细表格（0 明细也保持蓝色自动取数样式，避免被误读为人工填报）
+                            const isAuto = pr.source === '自动取数';
                             const hasDetail = Array.isArray(pr.detail) && pr.detail.length > 0;
-                            if (hasDetail && onShowDetail) {
+                            if (isAuto) {
                               return (
                                 <div className="space-y-0.5">
-                                  <button
-                                    onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
-                                    className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
-                                    title="查看本周明细"
-                                  >
-                                    {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
-                                  </button>
+                                  {hasDetail && onShowDetail ? (
+                                    <button
+                                      onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
+                                      className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
+                                      title="查看本期明细"
+                                    >
+                                      {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                  ) : (
+                                    <p className="text-base font-medium text-blue-600" title="本期无明细数据">{pr.progress}</p>
+                                  )}
                                   <p className="text-[13px] text-slate-400">自动取数 · 数据至 {(pr.cycleDate || '').slice(5).replace('-', '/')}</p>
                                 </div>
                               );

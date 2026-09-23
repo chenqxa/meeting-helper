@@ -33,6 +33,7 @@ export interface ActionItem {
   cycleDate?: string | null;        // 周期任务：归属周期日期（如持续项每周任务的 YYYY-MM-DD）
   autoFetch?: boolean;              // 持续项「自动取数」标记：开启后不再催人填报，由系统每周定时自动取数（取不到则不写）
   autoFetchSource?: string | null;  // 自动取数绑定的「取数源」key（见 lib/auto-fetch-sources-meta）
+  autoFetchParams?: Record<string, unknown> | null; // 绑定参数（如 {dept:'精益'}）：同一源按参数区分多条项
   autoXAt?: string | null;          // 系统自动打X时间戳（到期未处理自动打X，防重复）
   dueReminderAt?: string | null;    // 到期前预警已推送时间戳（防重复提醒）
 
@@ -52,6 +53,9 @@ export interface ActionItem {
   oaScore?: number | null;
   oaAutoDetected?: boolean;
   oaAttachments?: string[];
+
+  /** 整改前照片（导入时写入，独立于汇报附件 oaAttachments，避免被汇报覆盖） */
+  beforePhotos?: string[];
 
   createdAt: string;
   updatedAt: string;
@@ -144,6 +148,7 @@ export async function ensureTable(p: sql.ConnectionPool) {
       oa_score         FLOAT          NULL,
       oa_auto_detected BIT            NOT NULL DEFAULT 0,
       oa_attachments   NVARCHAR(MAX)  NULL,
+      before_photos    NVARCHAR(MAX)  NULL,
       created_at       NVARCHAR(64)   NOT NULL,
       updated_at       NVARCHAR(64)   NOT NULL
     )
@@ -229,6 +234,8 @@ export async function ensureTable(p: sql.ConnectionPool) {
   await p.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_fetch_source')
     ALTER TABLE hyzs_action_items ADD auto_fetch_source NVARCHAR(64) NULL
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_fetch_params')
+    ALTER TABLE hyzs_action_items ADD auto_fetch_params NVARCHAR(MAX) NULL
   `);
   await p.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'auto_x_at')
@@ -237,6 +244,10 @@ export async function ensureTable(p: sql.ConnectionPool) {
   await p.request().query(`
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'due_reminder_at')
     ALTER TABLE hyzs_action_items ADD due_reminder_at NVARCHAR(30) NULL
+  `);
+  await p.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('hyzs_action_items') AND name = 'before_photos')
+    ALTER TABLE hyzs_action_items ADD before_photos NVARCHAR(MAX) NULL
   `);
 
   // backfill existing rows
@@ -390,6 +401,7 @@ function rowToActionItem(row: any): ActionItem {
     cycleDate: row.cycle_date || null,
     autoFetch: !!row.auto_fetch,
     autoFetchSource: row.auto_fetch_source || null,
+    autoFetchParams: (() => { try { return row.auto_fetch_params ? JSON.parse(row.auto_fetch_params) : null; } catch { return null; } })(),
     autoXAt: row.auto_x_at || null,
     dueReminderAt: row.due_reminder_at || null,
     confirmedBy: row.confirmed_by || null,
@@ -406,6 +418,7 @@ function rowToActionItem(row: any): ActionItem {
     oaScore: row.oa_score ?? null,
     oaAutoDetected: !!row.oa_auto_detected,
     oaAttachments: row.oa_attachments ? JSON.parse(row.oa_attachments) : [],
+    beforePhotos: row.before_photos ? JSON.parse(row.before_photos) : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -459,7 +472,11 @@ export const getActionItemByMeetingAndOriginalId = async (
   const result = await p.request()
     .input('meeting_id', sql.NVarChar, meetingId)
     .input('original_id', sql.NVarChar, originalId)
-    .query(`SELECT * FROM hyzs_action_items WHERE meeting_id = @meeting_id AND original_id = @original_id`);
+    // 重派链会有多行同 original_id：优先取"当前有效行"（未被再次重派），再取最新，
+    // 避免 upsert/PUT 落到已被重派的旧行（历史无 ORDER BY 时取到哪行不确定）
+    .query(`SELECT TOP 1 * FROM hyzs_action_items
+            WHERE meeting_id = @meeting_id AND original_id = @original_id
+            ORDER BY CASE WHEN reassigned_to IS NULL THEN 0 ELSE 1 END, created_at DESC`);
   return result.recordset[0] ? rowToActionItem(result.recordset[0]) : null;
 };
 
@@ -544,6 +561,7 @@ export const createActionItem = async (data: Omit<ActionItem, 'id' | 'createdAt'
     .input('oa_score', sql.Float, data.oaScore ?? null)
     .input('oa_auto_detected', sql.Bit, data.oaAutoDetected ? 1 : 0)
     .input('oa_attachments', sql.NVarChar, JSON.stringify(data.oaAttachments || []))
+    .input('before_photos', sql.NVarChar, JSON.stringify(data.beforePhotos || []))
     .input('created_at', sql.NVarChar, now)
     .input('updated_at', sql.NVarChar, now)
     .query(`INSERT INTO hyzs_action_items
@@ -551,13 +569,13 @@ export const createActionItem = async (data: Omit<ActionItem, 'id' | 'createdAt'
        priority,status,confidence_owner,confidence_date,source_text,initial_result,reassigned_from,reassigned_to,proposer_dept,cycle_date,
        confirmed_by,confirmed_at,completed_by,completed_at,completion_note,evidence_files,
        block_reason,blocked_by,blocked_at,oa_result,oa_result_at,oa_score,oa_auto_detected,
-       oa_attachments,created_at,updated_at)
+       oa_attachments,before_photos,created_at,updated_at)
     VALUES
       (@id,@project_id,@meeting_id,@artifact_id,@original_id,@source_type,@source_id,@due_date_type,@description,@owner,@owner_login_id,@owner_oa_id,@dept,@proposer,@proposer_login_id,@proposer_oa_id,@due_date,
        @priority,@status,@confidence_owner,@confidence_date,@source_text,@initial_result,@reassigned_from,@reassigned_to,@proposer_dept,@cycle_date,
        @confirmed_by,@confirmed_at,@completed_by,@completed_at,@completion_note,@evidence_files,
        @block_reason,@blocked_by,@blocked_at,@oa_result,@oa_result_at,@oa_score,@oa_auto_detected,
-       @oa_attachments,@created_at,@updated_at)`);
+       @oa_attachments,@before_photos,@created_at,@updated_at)`);
 
   invalidateListCache();
   return { ...data, id, createdAt: now, updatedAt: now };
@@ -603,6 +621,7 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
     .input('oa_score', sql.Float, updated.oaScore ?? null)
     .input('oa_auto_detected', sql.Bit, updated.oaAutoDetected ? 1 : 0)
     .input('oa_attachments', sql.NVarChar, JSON.stringify(updated.oaAttachments || []))
+    .input('before_photos', sql.NVarChar, JSON.stringify(updated.beforePhotos || []))
     .input('reassigned_from', sql.NVarChar, updated.reassignedFrom || null)
     .input('reassigned_to', sql.NVarChar, updated.reassignedTo || null)
     .input('proposer_dept', sql.NVarChar, updated.proposerDept || null)
@@ -622,7 +641,7 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
       completion_note=@completion_note, evidence_files=@evidence_files,
       block_reason=@block_reason, blocked_by=@blocked_by, blocked_at=@blocked_at,
       oa_result=@oa_result, oa_result_at=@oa_result_at, oa_score=@oa_score,
-      oa_auto_detected=@oa_auto_detected, oa_attachments=@oa_attachments,
+      oa_auto_detected=@oa_auto_detected, oa_attachments=@oa_attachments, before_photos=@before_photos,
       reassigned_from=@reassigned_from, reassigned_to=@reassigned_to, proposer_dept=@proposer_dept,
       cycle_date=@cycle_date, auto_x_at=@auto_x_at, due_reminder_at=@due_reminder_at, updated_at=@updated_at
       WHERE id=@id`);
@@ -632,15 +651,22 @@ export const updateActionItem = async (id: string, data: Partial<ActionItem>): P
 };
 
 // 开启/关闭持续项「自动取数」标记并绑定取数源（仅 admin；专用轻量更新，不动其他字段）
-export const updateActionAutoFetch = async (id: string, enabled: boolean, sourceKey?: string | null): Promise<boolean> => {
+export const updateActionAutoFetch = async (
+  id: string,
+  enabled: boolean,
+  sourceKey?: string | null,
+  params?: Record<string, unknown> | null,
+): Promise<boolean> => {
   const p = await getPool();
   const now = new Date().toISOString();
+  const paramsJson = enabled && params && Object.keys(params).length > 0 ? JSON.stringify(params) : null;
   const r = await p.request()
     .input('id', sql.NVarChar, id)
     .input('auto_fetch', sql.Int, enabled ? 1 : 0)
     .input('auto_fetch_source', sql.NVarChar, enabled ? (sourceKey || null) : null)
+    .input('auto_fetch_params', sql.NVarChar, paramsJson)
     .input('updated_at', sql.NVarChar, now)
-    .query(`UPDATE hyzs_action_items SET auto_fetch=@auto_fetch, auto_fetch_source=@auto_fetch_source, updated_at=@updated_at WHERE id=@id`);
+    .query(`UPDATE hyzs_action_items SET auto_fetch=@auto_fetch, auto_fetch_source=@auto_fetch_source, auto_fetch_params=@auto_fetch_params, updated_at=@updated_at WHERE id=@id`);
   invalidateListCache();
   return (r.rowsAffected[0] || 0) > 0;
 };

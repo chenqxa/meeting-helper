@@ -23,6 +23,9 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: '50mb',
     },
+    // Next 16：经 proxy/中间件的请求体默认缓冲上限 10MB，超过会被截断
+    // Excel 带图导入文件可达 40MB，故放宽到 100MB
+    proxyClientMaxBodySize: '100mb',
   },
 };
 

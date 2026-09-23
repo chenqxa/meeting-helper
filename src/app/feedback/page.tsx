@@ -5,10 +5,12 @@ import DashboardLayout from '@/components/layout/dashboard-layout';
 import {
   RefreshCw, Search, Download, CheckCircle2, XCircle, Clock,
   ChevronDown, ChevronUp, Bug, Lightbulb, HelpCircle, MessageSquare,
-  RotateCcw, Trash2, Plus, ImagePlus, Loader2
+  RotateCcw, Trash2, Plus, ImagePlus, Loader2, FileText
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { WeaverPagination } from '@/components/ui/weaver-pagination';
+import { ImagePreview } from '@/components/ui/image-preview';
+import { FilePreview } from '@/components/ui/file-preview';
 
 interface FeedbackImage {
   url: string;
@@ -68,6 +70,9 @@ export default function FeedbackPage() {
   const [submitting, setSubmitting] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const newFileInputRef = useRef<HTMLInputElement>(null);
+  const [selPreviewOpen, setSelPreviewOpen] = useState(false);
+  const [selPreviewIdx, setSelPreviewIdx] = useState(0);
+  const [selFilePreview, setSelFilePreview] = useState<FeedbackImage | null>(null);
   const [resolveModal, setResolveModal] = useState<FeedbackItem | null>(null);
   const [resolveNote, setResolveNote] = useState('');
   const [resolveSubmitting, setResolveSubmitting] = useState(false);
@@ -123,10 +128,9 @@ export default function FeedbackPage() {
   const resolvedCount = filtered.filter(i => i.status === 'resolved').length;
 
   const uploadImage = async (file: File): Promise<FeedbackImage | null> => {
-    if (!file.type.startsWith('image/')) return null;
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('type', 'image');
+    fd.append('type', file.type.startsWith('image/') ? 'image' : 'file');
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       const data = await res.json();
@@ -136,7 +140,7 @@ export default function FeedbackPage() {
   };
 
   const handleFiles = async (files: FileList | File[]) => {
-    const arr = Array.from(files).filter(f => f.type.startsWith('image/'));
+    const arr = Array.from(files);
     if (arr.length === 0) return;
     setUploading(true);
     try {
@@ -578,21 +582,37 @@ export default function FeedbackPage() {
                   />
                   {newImages.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-2">
-                      {newImages.map((img, idx) => (
-                        <div key={idx} className="relative group">
-                          <img src={img.url} alt={img.name || ''} className="w-20 h-20 object-cover rounded-lg border border-slate-200" />
-                          <button onClick={() => setNewImages(prev => prev.filter((_, i) => i !== idx))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow">✕</button>
-                        </div>
-                      ))}
+                      {newImages.map((img, idx) => {
+                        const isImg = /\.(jpe?g|png|gif|webp|bmp)$/i.test(img.url) || /\.(jpe?g|png|gif|webp|bmp)$/i.test(img.name || '');
+                        return (
+                          <div key={idx} className="relative group">
+                            {isImg ? (
+                              <img src={img.url} alt={img.name || ''} className="w-20 h-20 object-cover rounded-lg border border-slate-200 cursor-zoom-in"
+                                onClick={() => {
+                                  const imgs = newImages.filter(x => /\.(jpe?g|png|gif|webp|bmp)$/i.test(x.url));
+                                  setSelPreviewIdx(Math.max(0, imgs.indexOf(img)));
+                                  setSelPreviewOpen(true);
+                                }} />
+                            ) : (
+                              <button type="button" onClick={() => setSelFilePreview(img)}
+                                className="w-20 h-20 rounded-lg border border-slate-200 bg-slate-50 flex flex-col items-center justify-center gap-1 px-1 hover:bg-slate-100">
+                                <FileText className="w-5 h-5 text-slate-400" />
+                                <span className="text-[9px] text-slate-500 break-all text-center" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{img.name}</span>
+                              </button>
+                            )}
+                            <button onClick={() => setNewImages(prev => prev.filter((_, i) => i !== idx))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow">✕</button>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                   <div className="flex items-center gap-2 mt-1">
                     <button type="button" onClick={() => newFileInputRef.current?.click()} disabled={uploading} className="text-xs text-emerald-600 hover:text-emerald-700 flex items-center gap-1 disabled:opacity-50">
                       {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImagePlus className="w-3.5 h-3.5" />}
-                      {uploading ? '上传中...' : '添加图片'}
+                      {uploading ? '上传中...' : '添加附件'}
                     </button>
-                    <span className="text-[11px] text-slate-400">支持粘贴/拖拽截图</span>
-                    <input ref={newFileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={e => { if (e.target.files) handleFiles(e.target.files); e.target.value = ''; }} />
+                    <span className="text-[11px] text-slate-400">支持粘贴/拖拽（图片/Word/Excel/PDF 等）</span>
+                    <input ref={newFileInputRef} type="file" multiple className="hidden" onChange={e => { if (e.target.files) handleFiles(e.target.files); e.target.value = ''; }} />
                   </div>
                 </div>
               </div>
@@ -665,6 +685,22 @@ export default function FeedbackPage() {
           <img src={previewImage} alt="预览" className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
           <button onClick={() => setPreviewImage(null)} className="absolute top-4 right-4 w-10 h-10 bg-white/20 hover:bg-white/30 text-white rounded-full flex items-center justify-center text-xl">✕</button>
         </div>
+      )}
+
+      {/* 已选附件预览（图片放大 / 文件在线预览） */}
+      <ImagePreview
+        images={newImages.filter(x => /\.(jpe?g|png|gif|webp|bmp)$/i.test(x.url)).map(x => x.url)}
+        index={selPreviewIdx}
+        open={selPreviewOpen}
+        onClose={() => setSelPreviewOpen(false)}
+      />
+      {selFilePreview && (
+        <FilePreview
+          url={selFilePreview.url}
+          filename={selFilePreview.name || selFilePreview.url}
+          open={!!selFilePreview}
+          onClose={() => setSelFilePreview(null)}
+        />
       )}
     </DashboardLayout>
   );

@@ -255,6 +255,7 @@ export async function GET(request: NextRequest) {
         oa_score: item.oaScore,
         oa_auto_detected: item.oaAutoDetected ?? false,
         oa_attachments: item.oaAttachments || [],
+        before_photos: item.beforePhotos || [],
         auto_fetch: item.autoFetch ? 1 : 0,
         auto_fetch_source: item.autoFetchSource || null,
       };

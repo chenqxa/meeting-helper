@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   Mic, FileText, Settings, Home, LayoutGrid, Building2,
   LogOut, ClipboardList, Menu, Plus, MessageSquareWarning, RefreshCw, FolderOpen,
-  Presentation, ScrollText, PanelLeftClose, PanelLeftOpen, Trophy
+  Presentation, ScrollText, PanelLeftClose, PanelLeftOpen, Trophy, Database
 } from 'lucide-react';
 import { useEffect, useState, useCallback } from 'react';
 import { AiAssistant } from '@/components/ui/ai-assistant';
@@ -284,9 +284,10 @@ export default function DashboardLayout({ children }: LayoutProps) {
       items: [
         { icon: ClipboardList, label: '行动项台账', href: '/tracking', perm: 'canViewTracking' },
         { icon: RefreshCw, label: '持续项跟进', href: '/continuous', perm: 'canViewContinuous' },
+        { icon: Database, label: '取数源管理', href: '/auto-fetch-sources', roles: ['admin'] },
         { icon: Trophy, label: '贡献看板', href: '/contribution', roles: ['admin', 'manager'] },
         { icon: MessageSquareWarning, label: '反馈台账', href: '/feedback', roles: ['admin', 'manager', 'employee'] },
-        { icon: FolderOpen, label: '批次管理', href: '/batches', roles: ['admin', 'manager', 'secretary', 'employee'] },
+        { icon: FolderOpen, label: '批次管理', href: '/batches', perm: 'canBatchImport' },
       ]
     },
     {

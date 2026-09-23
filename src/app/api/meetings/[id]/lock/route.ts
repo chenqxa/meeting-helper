@@ -8,6 +8,8 @@ import { searchOAUsers } from '@/lib/weaver-notify';
 import { sendScheduledTodos } from '@/lib/todo-push';
 import { syncMeetingActionsToWeCom } from '@/lib/wecom-action-push';
 import { logOperation } from '@/lib/operation-log';
+import { getCurrentUser } from '@/lib/session';
+import { guardAbility, guardPermission } from '@/lib/api-guard';
 
 async function getMeetingActionItemsForOAPush(meetingId: string, meeting: any) {
   try {
@@ -59,6 +61,19 @@ export async function POST(
         { success: false, error: '会议不存在' },
         { status: 404 }
       );
+    }
+
+    // 归档权限：具备 canLockMeeting（admin/manager/secretary），或本人是会议创建人（主持人）
+    {
+      const user = await getCurrentUser();
+      if (!user) {
+        return NextResponse.json(
+          { success: false, error: '未登录', code: 'UNAUTHORIZED' }, { status: 401 });
+      }
+      const g = await guardAbility('update', 'Meeting', meeting as any);
+      const isOrganizer = (meeting as any).organizerLoginId === user.loginid
+        || (meeting as any).organizer === user.name;
+      if (!g.ok && !isOrganizer) return g.response;
     }
 
     const actionItems = await getMeetingActionItemsForOAPush(meetingId, meeting);
@@ -411,6 +426,12 @@ export async function DELETE(
         { success: false, error: '会议不存在' },
         { status: 404 }
       );
+    }
+
+    // 解锁权限：仅 admin/manager（canUnlockMeeting）
+    {
+      const g = await guardPermission('canUnlockMeeting');
+      if (!g.ok) return g.response;
     }
 
     const actionItems = await getMeetingActionItemsForOAPush(meetingId, meeting);

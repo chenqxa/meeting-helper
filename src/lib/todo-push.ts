@@ -9,6 +9,7 @@ import { formatActionItemsToTodoList, formatActionItemsToStructuredCard } from '
 import { searchOAUsers } from '@/lib/weaver-notify';
 import { resolveHrmIdsByLoginIds } from '@/lib/oa-task-push';
 import { canPushActionItems } from '@/lib/meeting-status';
+import { recordPushLog } from '@/storage/database/push-log-storage';
 
 const ACTIVE_STATUSES = new Set<NonNullable<ActionItemRecord['status']>>([
   'pending',
@@ -376,6 +377,7 @@ export async function sendScheduledTodos(options: SendTodosOptions = {}): Promis
           count: bucket.actionItems.length,
           idempotentHit,
         });
+        void recordPushLog({ pushType: 'todo', channel: 'oa', recipient: bucket.ownerName, taskIds: bucket.actionItems.map(i => i.id), success: true });
       } else {
         result.failures += 1;
         const reason = failedList[0]?.reason || '未知错误';
@@ -386,6 +388,7 @@ export async function sendScheduledTodos(options: SendTodosOptions = {}): Promis
           count: bucket.actionItems.length,
           error: reason,
         });
+        void recordPushLog({ pushType: 'todo', channel: 'oa', recipient: bucket.ownerName, taskIds: bucket.actionItems.map(i => i.id), success: false, error: reason });
       }
     } catch (error) {
       result.failures += 1;
@@ -396,6 +399,7 @@ export async function sendScheduledTodos(options: SendTodosOptions = {}): Promis
         count: bucket.actionItems.length,
         error: error instanceof Error ? error.message : '发送异常',
       });
+      void recordPushLog({ pushType: 'todo', channel: 'oa', recipient: bucket.ownerName, taskIds: bucket.actionItems.map(i => i.id), success: false, error: error instanceof Error ? error.message : '发送异常' });
     }
   }
 

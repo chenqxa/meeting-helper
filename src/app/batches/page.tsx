@@ -95,6 +95,79 @@ export default function BatchListPage() {
     })();
   }, []);
 
+  // 导入权限：仅具备 canBatchImport 的用户可访问批次管理
+  useEffect(() => {
+    fetch('/api/permissions/mine')
+      .then(r => r.json())
+      .then(d => {
+        if (d.success) {
+          const perms: string[] = d.data.permissions || [];
+          setCanBatchImport(perms.includes('canBatchImport'));
+          setCanPushBatch(perms.includes('canPushBatch'));
+          setPermsChecked(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 手动推送企微提醒
+  const pushWeCom = async (id: string) => {
+    if (pushingId) return;
+    setPushingId(id);
+    try {
+      const r = await fetch(`/api/actions/batch/${id}/push-wecom`, { method: 'POST' }).then(x => x.json());
+      if (r.success) {
+        const d = r.data || {};
+        alert(`推送完成：成功 ${d.sent || 0}，失败 ${d.failed || 0}${d.errors?.length ? `\n${d.errors.slice(0, 5).join('\n')}` : ''}`);
+      } else {
+        alert('推送失败：' + (r.error || '未知错误'));
+      }
+    } catch {
+      alert('推送失败：网络错误');
+    }
+    setPushingId(null);
+  };
+
+  // 带图导入：预览（dryRun，不写库）
+  const doImportPreview = async () => {
+    if (!importFileObj) { alert('请先选择 Excel 文件'); return; }
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', importFileObj);
+      fd.append('dryRun', 'true');
+      const r = await fetch('/api/actions/import-with-images', { method: 'POST', body: fd }).then(x => x.json());
+      if (r.success) setImportPreview(r.data);
+      else alert('预览失败：' + (r.error || '未知错误'));
+    } catch { alert('预览失败：网络错误'); }
+    setImporting(false);
+  };
+
+  // 带图导入：正式导入
+  const doImport = async () => {
+    if (!importFileObj) { alert('请先选择 Excel 文件'); return; }
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', importFileObj);
+      if (importDept.trim()) fd.append('dept', importDept.trim());
+      if (importProposer.trim()) fd.append('proposer', importProposer.trim());
+      if (importOwner.trim()) fd.append('owner', importOwner.trim());
+      if (importBatchName.trim()) fd.append('batchName', importBatchName.trim());
+      const r = await fetch('/api/actions/import-with-images', { method: 'POST', body: fd }).then(x => x.json());
+      if (r.success) {
+        const d = r.data || {};
+        alert(`导入完成\n批次：${d.batchName}\n记录：${d.created}/${d.total}\n图片：${d.uploadedImages}${d.errors?.length ? `\n错误 ${d.errors.length} 条` : ''}`);
+        setShowImportModal(false);
+        setImportFileObj(null); setImportPreview(null); setImportDept(''); setImportProposer(''); setImportOwner(''); setImportBatchName('');
+        load();
+      } else {
+        alert('导入失败：' + (r.error || '未知错误'));
+      }
+    } catch { alert('导入失败：网络错误'); }
+    setImporting(false);
+  };
+
   const filtered = batches.filter(b => {
     if (search && !b.title.toLowerCase().includes(search.toLowerCase())) return false;
     if (statusFilter !== 'all' && b.status !== statusFilter) return false;
@@ -138,6 +211,19 @@ export default function BatchListPage() {
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [canBatchImport, setCanBatchImport] = useState(false);
+  const [canPushBatch, setCanPushBatch] = useState(false);
+  const [permsChecked, setPermsChecked] = useState(false);
+  const [pushingId, setPushingId] = useState<string | null>(null);
+  // 带图导入
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFileObj, setImportFileObj] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<{ records: number; totalImages: number; deptCounts?: Record<string, number>; unmatchedDepts?: string[] } | null>(null);
+  const [importDept, setImportDept] = useState('');
+  const [importProposer, setImportProposer] = useState('');
+  const [importOwner, setImportOwner] = useState('');
+  const [importBatchName, setImportBatchName] = useState('');
+  const [importing, setImporting] = useState(false);
 
   const importFile = async (file: File) => {
     let headerRow: string[] = [];
@@ -219,6 +305,17 @@ export default function BatchListPage() {
     alert(`已导入 ${rows.length} 条行动项，可编辑后创建批次`);
   };
 
+  if (permsChecked && !canBatchImport) {
+    return (
+      <DashboardLayout>
+        <div className="max-w-xl mx-auto mt-24 text-center">
+          <h1 className="text-xl font-bold text-slate-800 mb-2">无权访问</h1>
+          <p className="text-sm text-slate-500">批次管理仅对具备「批量导入行动项」权限的用户开放，如需使用请联系管理员。</p>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout>
       <div className="max-w-4xl mx-auto space-y-6">
@@ -228,12 +325,22 @@ export default function BatchListPage() {
             <h1 className="text-2xl font-bold text-slate-900">任务批次管理</h1>
             <p className="text-sm text-slate-500 mt-1">管理非会议产生的行动项批次，创建、编辑、推送到 OA</p>
           </div>
-          <button
-            onClick={openCreateModal}
-            className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 shadow-sm"
-          >
-            <Plus className="w-4 h-4" /> 新建批次
-          </button>
+          <div className="flex items-center gap-2">
+            {canBatchImport && (
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl text-sm font-semibold hover:bg-slate-50"
+              >
+                <Upload className="w-4 h-4" /> 导入Excel(带图)
+              </button>
+            )}
+            <button
+              onClick={openCreateModal}
+              className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 shadow-sm"
+            >
+              <Plus className="w-4 h-4" /> 新建批次
+            </button>
+          </div>
         </div>
 
         {/* 统计卡片 */}
@@ -306,6 +413,16 @@ export default function BatchListPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0 ml-4">
+                    {canPushBatch && (
+                      <button
+                        onClick={e => { e.stopPropagation(); pushWeCom(b.id); }}
+                        disabled={pushingId === b.id}
+                        className="h-7 px-2 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-[11px] flex items-center gap-1 disabled:opacity-50"
+                        title="给该批次的责任人推送企微提醒"
+                      >
+                        <Send className={`w-3.5 h-3.5 ${pushingId === b.id ? 'animate-pulse' : ''}`} /> {pushingId === b.id ? '推送中' : '推送企微'}
+                      </button>
+                    )}
                     <button
                       onClick={e => {
                         e.stopPropagation();
@@ -355,12 +472,16 @@ export default function BatchListPage() {
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-xs font-medium text-slate-500">行动项</label>
                     <div className="flex items-center gap-3">
-                      <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ''; }} />
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="text-xs text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1"
-                        title="从 Excel/CSV 导入行动项"
-                      ><Upload className="w-3 h-3" /> 导入</button>
+                      {canBatchImport && (
+                        <>
+                          <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ''; }} />
+                          <button
+                            onClick={() => fileInputRef.current?.click()}
+                            className="text-xs text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1"
+                            title="从 Excel/CSV 导入行动项"
+                          ><Upload className="w-3 h-3" /> 导入</button>
+                        </>
+                      )}
                       <button
                         onClick={() => setBatchRows(prev => [...prev, newBatchRow()])}
                         className="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
@@ -433,6 +554,83 @@ export default function BatchListPage() {
                   className="px-5 h-10 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-all flex items-center gap-2"
                 >
                   {batchSubmitting ? <>··· 创建中</> : <>创建</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 导入 Excel（带图）弹窗 */}
+        {showImportModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={e => { if (e.target === e.currentTarget) setShowImportModal(false); }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[88vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">导入 Excel（带图）</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">文字 + 内嵌照片一起导入为行动项，照片挂「整改前照片」</p>
+                </div>
+                <button onClick={() => setShowImportModal(false)} className="w-8 h-8 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-400"><X className="w-4 h-4" /></button>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">Excel 文件 <span className="text-red-400">*</span></label>
+                  <input type="file" accept=".xlsx"
+                    onChange={e => { setImportFileObj(e.target.files?.[0] || null); setImportPreview(null); }}
+                    className="block w-full text-sm text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 file:text-xs" />
+                </div>
+
+                <button onClick={doImportPreview} disabled={!importFileObj || importing}
+                  className="h-9 px-4 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200 disabled:opacity-50">
+                  {importing ? '解析中…' : '① 预览解析结果'}
+                </button>
+
+                {importPreview && (
+                  <div className="text-xs bg-slate-50 border border-slate-100 rounded-lg p-3 space-y-1">
+                    <div>共 <b>{importPreview.records}</b> 条记录、<b>{importPreview.totalImages}</b> 张图片</div>
+                    {!!importPreview.unmatchedDepts?.length && (
+                      <div className="text-amber-600">对不上组织架构的部门：{importPreview.unmatchedDepts.join(' / ')}</div>
+                    )}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">部门筛选（可选）</label>
+                    <select value={importDept} onChange={e => setImportDept(e.target.value)}
+                      className="w-full h-9 text-sm border border-slate-200 rounded-lg px-2.5 bg-white">
+                      <option value="">全部部门</option>
+                      {importPreview && Object.entries(importPreview.deptCounts || {}).map(([k, v]) => (
+                        <option key={k} value={k}>{k}（{v}）</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">批次名</label>
+                    <input value={importBatchName} onChange={e => setImportBatchName(e.target.value)} placeholder="留空自动生成"
+                      className="w-full h-9 text-sm border border-slate-200 rounded-lg px-2.5" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">提出人（可选）</label>
+                    <input value={importProposer} onChange={e => setImportProposer(e.target.value)} list="import-people-list" placeholder="默认=导入人"
+                      className="w-full h-9 text-sm border border-slate-200 rounded-lg px-2.5" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">责任人（可选）</label>
+                    <input value={importOwner} onChange={e => setImportOwner(e.target.value)} list="import-people-list" placeholder="默认取表格/部门"
+                      className="w-full h-9 text-sm border border-slate-200 rounded-lg px-2.5" />
+                  </div>
+                </div>
+                <datalist id="import-people-list">
+                  {orgEmployees.map(e => <option key={e.id} value={e.name}>{e.name} ({e.department})</option>)}
+                </datalist>
+              </div>
+
+              <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
+                <button onClick={() => setShowImportModal(false)} className="px-5 h-10 border border-slate-200 text-slate-500 rounded-xl text-sm font-medium hover:bg-slate-50">取消</button>
+                <button onClick={doImport} disabled={!importFileObj || importing}
+                  className="px-5 h-10 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50">
+                  {importing ? '导入中…' : '② 开始导入'}
                 </button>
               </div>
             </div>

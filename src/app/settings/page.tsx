@@ -5,6 +5,7 @@ import DashboardLayout from '@/components/layout/dashboard-layout';
 import { Plus, Trash2, Tag, Pencil, CalendarClock, Zap } from 'lucide-react';
 import { toast } from 'sonner';
 import { SearchableSelect } from '@/components/ui/searchable-select';
+import { PushLogTab } from './push-log-tab';
 
 interface MeetingType { id: string; name: string; defaultDept: string; defaultOwner: string; sort: number; }
 type FormData = { name: string; defaultDept: string; defaultOwner: string };
@@ -33,7 +34,7 @@ function fmtLocal(iso: string | null | undefined): string {
 }
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<'meeting-types' | 'cadence'>('meeting-types');
+  const [tab, setTab] = useState<'meeting-types' | 'cadence' | 'push-log'>('meeting-types');
   const [types, setTypes] = useState<MeetingType[]>([]);
   const [loading, setLoading] = useState(true);
   const [depts, setDepts] = useState<string[]>([]);
@@ -181,7 +182,14 @@ export default function SettingsPage() {
             className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${tab === 'cadence' ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
             <CalendarClock className="w-4 h-4 inline mr-1.5" /> 持续项推送配置
           </button>
+          <button onClick={() => setTab('push-log')}
+            className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${tab === 'push-log' ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+            <Zap className="w-4 h-4 inline mr-1.5" /> 推送日志 / 自测
+          </button>
         </div>
+
+        {/* ── 推送日志 / 自测 ── */}
+        {tab === 'push-log' && <PushLogTab />}
 
         {/* ── 会议类别 ── */}
         {tab === 'meeting-types' && (

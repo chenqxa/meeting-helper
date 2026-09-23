@@ -114,7 +114,7 @@ const priorityMeta = (p: string) => PRIORITY_META[p] ?? PRIORITY_META.medium;
 function StatsSlide({ items, contItems = [], progressMap = {}, period = 'month' }: {
   items: BoardItem[];
   contItems?: BoardItem[];
-  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  progressMap?: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }>;
   period?: 'week' | 'month';
 }) {
   const stats = useMemo(() => {
@@ -525,7 +525,7 @@ function Metric({ label, value, unit, tone, sub }: {
 function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
   items: BoardItem[];
   mode: 'done' | 'pending';
-  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>;
+  progressMap?: Record<string, { progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; detail?: any[] | null }>;
   onShowDetail?: (pr: { progress: string; cycleDate?: string; detail: any[]; sourceKey?: string | null }) => void; // 自动取数明细点击
 }) {
   const rows = items;
@@ -620,18 +620,23 @@ function ContinuousSlide({ items, mode, progressMap, onShowDetail }: {
                         {(() => {
                           const pr = progressMap?.[it.id];
                           if (pr?.progress) {
-                            // 自动取数：格子只显示简短汇总，点击弹明细表格
+                            // 自动取数：格子只显示简短汇总，点击弹明细表格（0 明细也保持蓝色自动取数样式，避免被误读为人工填报）
+                            const isAuto = pr.source === '自动取数';
                             const hasDetail = Array.isArray(pr.detail) && pr.detail.length > 0;
-                            if (hasDetail && onShowDetail) {
+                            if (isAuto) {
                               return (
                                 <div className="space-y-0.5">
-                                  <button
-                                    onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
-                                    className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
-                                    title="查看本周明细"
-                                  >
-                                    {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
-                                  </button>
+                                  {hasDetail && onShowDetail ? (
+                                    <button
+                                      onClick={() => onShowDetail({ progress: pr.progress || '', cycleDate: pr.cycleDate, detail: pr.detail as any[], sourceKey: (it as any).auto_fetch_source ?? null })}
+                                      className="inline-flex items-center gap-1 text-base font-medium text-blue-600 hover:text-blue-800"
+                                      title="查看本期明细"
+                                    >
+                                      {pr.progress}<ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                  ) : (
+                                    <p className="text-base font-medium text-blue-600" title="本期无明细数据">{pr.progress}</p>
+                                  )}
                                   <p className="text-[13px] text-slate-400">自动取数 · 数据至 {(pr.cycleDate || '').slice(5).replace('-', '/')}</p>
                                 </div>
                               );
@@ -1044,7 +1049,7 @@ function Chip({ icon, className, children }: { icon: React.ReactNode; className?
 export default function MonthlyBoardPage() {
   const { denied: permDenied } = useBoardPermission('monthly');
   const [items, setItems] = useState<BoardItem[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }>>({});
+  const [progressMap, setProgressMap] = useState<Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; dataMonth?: string | null; detail?: any[] | null }>>({});
   const [gsmalt, setGsmalt] = useState<GsmaltItem[]>([]);
   const [gsmaltLoading, setGsmaltLoading] = useState(false);
   const [gsmaltError, setGsmaltError] = useState<string | null>(null);
@@ -1068,15 +1073,23 @@ export default function MonthlyBoardPage() {
       // 拉取持续项周期填报进展（actionId → 进展列表）
       const pr = await fetch('/api/continuous/progress').then(r => r.json());
       if (pr.success) {
-        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; detail?: any[] | null }> = {};
+        const map: Record<string, {   progress: string | null; cycleDate: string; syncedAt: string; source?: string | null; dataMonth?: string | null; detail?: any[] | null }> = {};
         for (const [actionId, recs] of Object.entries(pr.data || {})) {
           const list = (recs as any[]);
-          const latest = list.sort((a, b) => String(b.cycleDate).localeCompare(String(a.cycleDate)))[0];
+          const sorted = [...list].sort((a, b) => String(b.cycleDate).localeCompare(String(a.cycleDate)));
+          const newest = sorted[0];
+          // 同一 data_month 下「自动取数」优先于人工填报：自动取数项不再人工催报，系统结果才是本期口径
+          const autoSameCycle = newest
+            ? sorted.find(r => r.source === '自动取数' && (r.dataMonth || null) === (newest.dataMonth || null))
+            : undefined;
+          const latest = autoSameCycle || newest;
           if (latest) {
             map[actionId] = {
               progress: latest.progress || null,
               cycleDate: latest.cycleDate,
               syncedAt: latest.syncedAt,
+              dataMonth: latest.dataMonth || null,
+              source: latest.source ?? null,
               detail: latest.detail ?? null,
             };
           }

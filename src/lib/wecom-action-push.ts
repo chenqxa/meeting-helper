@@ -266,3 +266,80 @@ export async function syncMeetingActionsToWeCom(
   result.status = result.failed > 0 && result.sent === 0 ? 'failed' : (result.sent > 0 ? 'success' : 'skipped');
   return result;
 }
+
+/**
+ * 手动推送"批次/导入项"企微提醒：按责任人聚合卡片，带各自 taskIds，点击直达「我的任务」。
+ * 无快照幂等（手动触发每次都发），逐收件人写 hyzs_push_log。
+ */
+export async function pushBatchActionsToWeCom(params: {
+  batchId: string;
+  batchTitle?: string;
+  items: PushItem[];
+  triggeredBy?: string;
+}): Promise<WeComActionPushResult> {
+  const result: WeComActionPushResult = { status: 'skipped', sent: 0, skipped: 0, failed: 0, errors: [] };
+
+  if (process.env.WECOM_ACTION_PUSH_ENABLED === 'false') {
+    console.log('[WeComBatchPush] 开关关闭，跳过');
+    return result;
+  }
+
+  const activeItems = params.items.filter(i => ACTIVE_STATUSES.has(String(i.status || 'pending')));
+  if (activeItems.length === 0) return result;
+
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || '';
+  if (!baseUrl) {
+    result.status = 'failed';
+    result.errors.push('未配置 NEXT_PUBLIC_APP_URL');
+    return result;
+  }
+
+  const buckets = new Map<string, PushItem[]>();
+  for (const it of activeItems) {
+    const owner = String(it.owner || it.assignee || '').trim();
+    if (!owner) continue;
+    if (!buckets.has(owner)) buckets.set(owner, []);
+    buckets.get(owner)!.push(it);
+  }
+
+  const nameToUserId = await resolveUserIdsByNames(Array.from(buckets.keys()), false);
+  const { recordPushLog } = await import('@/storage/database/push-log-storage');
+
+  for (const [owner, bucket] of buckets.entries()) {
+    const taskIds = bucket.map(b => b.id);
+    const userId = nameToUserId.get(owner);
+    if (!userId) {
+      result.failed++;
+      result.errors.push(`${owner}: 未匹配企微用户`);
+      void recordPushLog({ pushType: 'batch', channel: 'wecom', recipient: owner, taskIds, success: false, error: '企微未匹配到用户' });
+      continue;
+    }
+    const url = `${baseUrl}/kanban?view=my&shared=true&taskIds=${encodeURIComponent(taskIds.join(','))}`;
+    const title = `📋 ${params.batchTitle || '行动项'}（${bucket.length}条）`;
+    const lines = bucket.slice(0, 4).map((t, i) => `${i + 1}. ${String(t.description || '').slice(0, 26)}`).join('\n');
+    const more = bucket.length > 4 ? `\n…共${bucket.length}条` : '';
+    const description = `${lines}${more}\n点击填写处理结果`;
+
+    try {
+      const r = await sendTextCardMessage([userId], title, description, url);
+      if (r.success) {
+        result.sent++;
+        void recordPushLog({ pushType: 'batch', channel: 'wecom', recipient: owner, taskIds, success: true });
+        console.log(`[WeComBatchPush] ✓ ${owner}（${bucket.length}条）`);
+      } else {
+        result.failed++;
+        result.errors.push(`${owner}: ${r.error}`);
+        void recordPushLog({ pushType: 'batch', channel: 'wecom', recipient: owner, taskIds, success: false, error: r.error || '发送失败' });
+        console.error(`[WeComBatchPush] ✗ ${owner}:`, r.error);
+      }
+    } catch (e) {
+      result.failed++;
+      result.errors.push(`${owner}: ${(e as Error).message}`);
+      void recordPushLog({ pushType: 'batch', channel: 'wecom', recipient: owner, taskIds, success: false, error: (e as Error).message });
+      console.error(`[WeComBatchPush] ✗ ${owner}:`, (e as Error).message);
+    }
+  }
+
+  result.status = result.failed > 0 && result.sent === 0 ? 'failed' : (result.sent > 0 ? 'success' : 'skipped');
+  return result;
+}

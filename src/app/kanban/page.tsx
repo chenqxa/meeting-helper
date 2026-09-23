@@ -8,6 +8,8 @@ import {
   FileText, Eye, Pencil, Ban, Paperclip, X, Save, ShieldAlert, LayoutGrid, ChevronDown, Sparkles, Trash2
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { ImagePreview } from '@/components/ui/image-preview';
+import { FilePreview } from '@/components/ui/file-preview';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter
 } from '@/components/ui/dialog';
@@ -497,6 +499,9 @@ export default function KanbanPage() {
   const [resultForm, setResultForm] = useState({ text: '', status: 'in_progress' });
   const [nextDueDate, setNextDueDate] = useState('');
   const [resultImages, setResultImages] = useState<File[]>([]);
+  const [selPreviewOpen, setSelPreviewOpen] = useState(false);
+  const [selPreviewIdx, setSelPreviewIdx] = useState(0);
+  const [selFilePreview, setSelFilePreview] = useState<File | null>(null);
   const [resultNone, setResultNone] = useState(false); // 持续项「本期无进展/无完成情况」：true=无（免填说明与附件）
   const [tbdDueDate, setTbdDueDate] = useState(''); // tbd（自动转派）任务的节点日期填写
   const [tbdItem, setTbdItem] = useState<KanbanCard | null>(null); // tbd 轻量弹窗（只填日期，不弹汇报）
@@ -2189,24 +2194,44 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                 <div className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-pointer group"
                   onClick={() => document.getElementById('kanban-img-upload')?.click()}
                   onDragOver={e => e.preventDefault()}
-                  onDrop={e => { e.preventDefault(); setResultImages(prev => [...prev, ...Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))]); }}>
-                  <input id="kanban-img-upload" type="file" accept="image/*" multiple className="hidden"
+                  onDrop={e => { e.preventDefault(); setResultImages(prev => [...prev, ...Array.from(e.dataTransfer.files)]); }}>
+                  <input id="kanban-img-upload" type="file" multiple className="hidden"
                     onChange={e => setResultImages(prev => [...prev, ...Array.from(e.target.files || [])])} />
-                  <div className="text-2xl mb-1">🖼️</div>
-                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽图片 / <b>Ctrl+V 粘贴微信QQ截图</b></div>
-                  <div className="text-[10px] text-slate-300 mt-0.5">支持 JPG · PNG · GIF · WebP</div>
+                  <div className="text-2xl mb-1">📎</div>
+                  <div className="text-xs text-slate-400 group-hover:text-blue-500 transition-colors">点击上传 / 拖拽文件 / <b>Ctrl+V 粘贴截图</b></div>
+                  <div className="text-[10px] text-slate-300 mt-0.5">支持 图片 · Word · Excel · PDF 等任意格式（单文件 ≤50MB）</div>
                 </div>
                 {resultImages.length > 0 && (
                   <div className="mt-3 grid grid-cols-4 gap-2">
-                    {resultImages.map((f, i) => (
-                      <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group">
-                        <img src={URL.createObjectURL(f)} alt="" className="w-full h-full object-cover" />
-                        <button onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== i))}
-                          className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
+                    {resultImages.map((f, i) => {
+                      const isImg = f.type.startsWith('image/');
+                      return (
+                        <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200 group bg-slate-50">
+                          {isImg ? (
+                            <img
+                              src={URL.createObjectURL(f)}
+                              alt=""
+                              className="w-full h-full object-cover cursor-zoom-in"
+                              onClick={() => {
+                                const imgs = resultImages.filter(x => x.type.startsWith('image/'));
+                                setSelPreviewIdx(Math.max(0, imgs.indexOf(f)));
+                                setSelPreviewOpen(true);
+                              }}
+                            />
+                          ) : (
+                            <button type="button" onClick={() => setSelFilePreview(f)}
+                              className="w-full h-full flex flex-col items-center justify-center gap-1 px-1 text-center hover:bg-slate-100">
+                              <FileText className="w-5 h-5 text-slate-400" />
+                              <span className="text-[10px] text-slate-500 break-all" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{f.name}</span>
+                            </button>
+                          )}
+                          <button onClick={() => setResultImages(prev => prev.filter((_, idx) => idx !== i))}
+                            className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
                     <div className="aspect-square rounded-lg border-2 border-dashed border-slate-200 flex items-center justify-center cursor-pointer hover:border-blue-300 hover:bg-blue-50/30 transition-all" onClick={() => document.getElementById('kanban-img-upload')?.click()}>
                       <span className="text-slate-300 text-xl">+</span>
                     </div>
@@ -2249,9 +2274,14 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                     const imageUrls: string[] = [];
                     if (!isNone) {
                       for (const file of resultImages) {
-                        const fd = new FormData(); fd.append('file', file); fd.append('type', 'image');
-                        const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json());
-                        if (r.success) imageUrls.push(r.url);
+                        const fd = new FormData(); fd.append('file', file); fd.append('type', 'file');
+                        const up = await fetch('/api/upload', { method: 'POST', body: fd });
+                        const r: { success?: boolean; url?: string; error?: string } | null = await up.json().catch(() => null);
+                        if (!up.ok || !r?.success) {
+                          alert(`附件「${file.name}」上传失败：${r?.error || `HTTP ${up.status}`}\n请检查网络；照片过大时可压缩后重试`);
+                          return;
+                        }
+                        imageUrls.push(r.url!);
                       }
                     }
                     const res = await fetch(`/api/actions/${resultItem.id}`, {
@@ -2278,6 +2308,8 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
                       const j = await res.json().catch(() => ({}));
                       alert((j as any).error || `提交失败（${res.status}）`);
                     }
+                  } catch (e) {
+                    alert(`提交异常：${e instanceof Error ? e.message : e}`);
                   } finally { setResultSubmitting(false); }
                 }}
                 disabled={resultSubmitting}
@@ -2732,6 +2764,23 @@ const pendingCount = filteredCards.filter(c => c.status === 'pending' || c.statu
             </div>
           </div>
         </div>
+      )}
+
+      {/* 已选附件预览（图片放大 / 文件在线预览） */}
+      <ImagePreview
+        images={resultImages.filter(f => f.type.startsWith('image/')).map(f => URL.createObjectURL(f))}
+        index={selPreviewIdx}
+        open={selPreviewOpen}
+        onClose={() => setSelPreviewOpen(false)}
+      />
+      {selFilePreview && (
+        <FilePreview
+          url={URL.createObjectURL(selFilePreview)}
+          filename={selFilePreview.name}
+          mime={selFilePreview.type}
+          open={!!selFilePreview}
+          onClose={() => setSelFilePreview(null)}
+        />
       )}
 
       </div>

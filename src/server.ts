@@ -432,8 +432,8 @@ function scheduleContinuousPush() {
   }, 60_000);
 }
 
-// ── 持续项「自动取数」：每周一 00:30（北京时间）自动取上一自然周数据，写入进度表 ──
-// 只对开启 auto_fetch 的持续项生效；数据源 SQL 未接入前为空跑（不写、不催）
+// ── 持续项「自动取数」：每周一 00:30（北京时间）取上一自然周数据；每月16日 00:30 额外执行（产销会周期 上月16~本月15 刚结束，18号开会前把月度源刷成完整数据）──
+// 只对开启 auto_fetch 的持续项生效；周例会源按周窗口覆盖，月度源（产销会）按 16~15 周期覆盖
 function scheduleContinuousAutoFetch() {
   const scheduleNext = () => {
     const nextFire = computeNextFire('00:30');
@@ -442,9 +442,10 @@ function scheduleContinuousAutoFetch() {
     console.log(`[ContinuousAutoFetch] 下次自动取数检查: ${nextFire.toLocaleString()}`);
     setTimeout(async () => {
       try {
-        // 仅北京时间周一凌晨执行（取上一自然周数据，周一早上即可用于周会看板）
+        // 北京时间周一凌晨：取上一自然周（周一早上即可用于周会看板）
+        // 每月16日凌晨：产销会周期（上月16~本月15）结束次日，刷新月度源保证18号开会数据完整
         const bj = getBeijingParts(new Date());
-        if (bj.dayOfWeek === 1) {
+        if (bj.dayOfWeek === 1 || bj.date === 16) {
           const { runAutoFetch } = await import('@/lib/continuous-auto-fetch');
           const r = await runAutoFetch(new Date());
           console.log(`[ContinuousAutoFetch] ${r.window.startLabel}~${r.window.endLabel} 候选 ${r.candidates} 写入 ${r.written} 缺失 ${r.missing.length}`);
@@ -459,28 +460,30 @@ function scheduleContinuousAutoFetch() {
 }
 
 // ── 行动项「到期自动打X+转派」：每天 09:00（北京时间）先推预警再打X ──
+// 用「每分钟轮询 + 北京时间 hhmm 比对」，不依赖进程/容器时区（生产容器默认 UTC，
+// 若用 computeNextFire('09:00') 会按 UTC 钟面触发，实际拖到北京 17:00）
+let autoOverdueLastDate: string | null = null;
+
 function scheduleAutoOverdueX() {
-  const scheduleNext = () => {
-    const nextFire = computeNextFire('09:00');
-    if (!nextFire) return;
-    const delay = nextFire.getTime() - Date.now();
-    console.log(`[AutoOverdueX] 下次检查: ${nextFire.toLocaleString()}`);
-    setTimeout(async () => {
-      try {
-        const { runDueReminder, runAutoOverdueX } = await import('@/lib/auto-overdue-processor');
-        // A. 到期前预警（明天到期）
-        const reminder = await runDueReminder(false);
-        console.log(`[AutoOverdueX] 预警：明天(${reminder.tomorrow})到期 ${reminder.candidates} 条，推送 ${reminder.pushed}`);
-        // B. 到期后打X+转派
-        const xResult = await runAutoOverdueX(false);
-        console.log(`[AutoOverdueX] 打X：${xResult.yesterday} 前到期 ${xResult.candidates} 条，打X ${xResult.xCount}，新任务 ${xResult.newTaskCount}，推送 ${xResult.pushed}`);
-      } catch (e) {
-        console.error('[AutoOverdueX] 执行异常:', e instanceof Error ? e.message : e);
-      }
-      scheduleNext();
-    }, delay);
-  };
-  scheduleNext();
+  console.log('[AutoOverdueX] 调度已启动：每分钟检查，命中北京时间 09:00 执行');
+  setInterval(async () => {
+    try {
+      const bj = getBeijingParts(new Date());
+      if (bj.hhmm !== '09:00') return;
+      // 当天只跑一次，防定时器抖动/进程重启重复执行
+      if (autoOverdueLastDate === bj.dateStr) return;
+      autoOverdueLastDate = bj.dateStr;
+      const { runDueReminder, runAutoOverdueX } = await import('@/lib/auto-overdue-processor');
+      // A. 到期前预警（明天到期）
+      const reminder = await runDueReminder(false);
+      console.log(`[AutoOverdueX] 预警：明天(${reminder.tomorrow})到期 ${reminder.candidates} 条，推送 ${reminder.pushed}`);
+      // B. 到期后打X+转派
+      const xResult = await runAutoOverdueX(false);
+      console.log(`[AutoOverdueX] 打X：${xResult.yesterday} 前到期 ${xResult.candidates} 条，打X ${xResult.xCount}，新任务 ${xResult.newTaskCount}，推送 ${xResult.pushed}`);
+    } catch (e) {
+      console.error('[AutoOverdueX] 执行异常:', e instanceof Error ? e.message : e);
+    }
+  }, 60_000);
 }
 
 // Create Next.js app
@@ -508,14 +511,10 @@ app.prepare().then(() => {
         const targetUrl = url.query.target as string;
         const authorization = url.query.authorization as string | undefined;
         const openaiBeta = url.query.openaiBeta as string | undefined;
-        const traceId = `qwen-proxy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         if (!targetUrl) {
           clientWs.close(4000, 'Missing target URL');
           return;
         }
-        // #region debug-point C:qwen-proxy-upgrade
-        (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'C',location:'server.ts:/ws/asr:upgrade',traceId,msg:'[DEBUG] qwen proxy upgrade',data:{targetUrl,hasAuthorization:!!authorization,hasOpenAIBeta:!!openaiBeta},ts:Date.now()})}).catch(()=>{})})();
-        // #endregion
         console.log(`[ASR Proxy] 连接到 ${targetUrl.slice(0, 60)}...`);
         const headers: Record<string, string> = {};
         if (authorization) headers.Authorization = authorization;
@@ -528,9 +527,6 @@ app.prepare().then(() => {
         const pendingQueue: (string | Buffer)[] = [];
 
         remote.on('open', () => {
-          // #region debug-point C:qwen-proxy-remote-open
-          (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'C',location:'server.ts:/ws/asr:remote-open',traceId,msg:'[DEBUG] qwen proxy remote open',data:{pendingQueueLength:pendingQueue.length},ts:Date.now()})}).catch(()=>{})})();
-          // #endregion
           remoteReady = true;
           // 发送缓存的消息
           for (const msg of pendingQueue) remote.send(msg);
@@ -543,15 +539,9 @@ app.prepare().then(() => {
           }
         });
         remote.on('close', (code, reason) => {
-          // #region debug-point C:qwen-proxy-remote-close
-          (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'C',location:'server.ts:/ws/asr:remote-close',traceId,msg:'[DEBUG] qwen proxy remote close',data:{code,reason:reason?.toString?.()||'',remoteReady},ts:Date.now()})}).catch(()=>{})})();
-          // #endregion
           clientWs.close();
         });
         remote.on('error', (e) => {
-          // #region debug-point C:qwen-proxy-remote-error
-          (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e2=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e2.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e2.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'C',location:'server.ts:/ws/asr:remote-error',traceId,msg:'[DEBUG] qwen proxy remote error',data:{message:e.message},ts:Date.now()})}).catch(()=>{})})();
-          // #endregion
           console.error('[ASR Proxy] remote error:', e.message);
           const closeReason = /timed out/i.test(e.message)
             ? 'Remote ASR handshake timeout'
@@ -568,9 +558,6 @@ app.prepare().then(() => {
           }
         });
         clientWs.on('close', () => {
-          // #region debug-point C:qwen-proxy-client-close
-          (async()=>{let u='http://127.0.0.1:7777/event',s='qwen3-realtime-error';try{const {readFileSync}=await import('fs');const e=readFileSync('.dbg/qwen3-realtime-error.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'C',location:'server.ts:/ws/asr:client-close',traceId,msg:'[DEBUG] qwen proxy client close',data:{remoteReady,remoteState:remote.readyState,pendingQueueLength:pendingQueue.length},ts:Date.now()})}).catch(()=>{})})();
-          // #endregion
           if (remote.readyState === WebSocket.OPEN) remote.close();
         });
       });

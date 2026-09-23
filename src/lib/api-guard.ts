@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/session';
-import { resolveRole, hasPermission, PermissionKey } from '@/lib/roles';
+import { resolveRole, hasPermission, getEffectivePermissions, PermissionKey } from '@/lib/roles';
+import { defineAbilityFor, asSubject, AppAction, AppSubject } from '@/lib/ability';
 import { logOperation } from '@/lib/operation-log';
 
 // ─────────────────────────────────────────────────────────────
@@ -43,4 +44,50 @@ export async function guardWrite(min: 'admin' | 'manager') {
       { success: false, error: '无权限执行此操作', code: 'FORBIDDEN' }, { status: 403 }) };
   }
   return { ok: true as const, user };
+}
+
+function unauthorizedResponse() {
+  return NextResponse.json(
+    { success: false, error: '未登录', code: 'UNAUTHORIZED' }, { status: 401 });
+}
+
+function forbiddenResponse(user: { loginid: string }, what: string, role?: string) {
+  void logOperation({
+    action: 'forbidden',
+    targetType: 'api',
+    summary: `越权尝试：${user.loginid}${role ? `(role=${role})` : ''} 请求 ${what}`,
+  }).catch(() => {});
+  return NextResponse.json(
+    { success: false, error: '无权限执行此操作', code: 'FORBIDDEN' }, { status: 403 });
+}
+
+/**
+ * 精确权限点守卫（推荐新代码使用）：按权限点判定，内部走 getEffectivePermissions（含人员级覆盖）。
+ * 用法：const g = await guardPermission('canCreateMeeting'); if (!g.ok) return g.response;
+ */
+export async function guardPermission(key: PermissionKey) {
+  const user = await getCurrentUser();
+  if (!user) return { ok: false as const, response: unauthorizedResponse() };
+  const { isSystemAdmin, perms, role } = await getEffectivePermissions(user.loginid);
+  const ability = defineAbilityFor(user, perms, isSystemAdmin);
+  const map = (await import('@/lib/ability')).PERMISSION_ABILITY[key];
+  const pass = map ? ability.can(map[0], map[1]) : perms[key] === true;
+  if (!pass) return { ok: false as const, response: forbiddenResponse(user, `权限点 ${key}`, role) };
+  return { ok: true as const, user, ability, perms, role };
+}
+
+/**
+ * CASL 资源守卫：功能权限（由 ability rules 表达）+ 资源条件。
+ * resource 会带类型标记后交给 ability.can 做条件判断（如 meeting.organizer / meeting.status）。
+ */
+export async function guardAbility(action: AppAction, subjectType: AppSubject, resource?: object) {
+  const user = await getCurrentUser();
+  if (!user) return { ok: false as const, response: unauthorizedResponse() };
+  const { isSystemAdmin, perms, role } = await getEffectivePermissions(user.loginid);
+  const ability = defineAbilityFor(user, perms, isSystemAdmin);
+  const target = resource ? asSubject(subjectType, resource) : subjectType;
+  if (!ability.can(action, target as any)) {
+    return { ok: false as const, response: forbiddenResponse(user, `${action}:${subjectType}`, role), ability };
+  }
+  return { ok: true as const, user, ability, perms, role };
 }

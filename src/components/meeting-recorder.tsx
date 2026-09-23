@@ -193,12 +193,8 @@ export default function MeetingRecorder({
   }, []);
 
   const startQwenRtWs = useCallback(async () => {
-    const traceId = `qwen-rt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const signRes = await fetch('/api/asr/tingwu-sign');
     const signData = await signRes.json();
-    // #region debug-point B:qwen-client-sign
-    fetch('http://127.0.0.1:7777/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'qwen3-realtime-error',runId:'pre-fix',hypothesisId:'B',location:'meeting-recorder:startQwenRtWs:sign',traceId,msg:'[DEBUG] qwen client sign response',data:{ok:!!signData.success,status:signRes.status,error:signData.error||null,hasWsUrl:!!signData.wsUrl,hasApiKey:!!signData.apiKey},ts:Date.now()})}).catch(()=>{});
-    // #endregion
     if (!signData.success) throw new Error(signData.error || '获取 Qwen3 实时配置失败');
 
     const primaryUrl = signData.wsUrl as string;
@@ -272,9 +268,6 @@ export default function MeetingRecorder({
           const msg = JSON.parse(event.data as string);
           const type = msg.type;
           if (type === 'session.created' || type === 'session.updated' || type === 'error' || type === 'conversation.item.input_audio_transcription.failed') {
-            // #region debug-point B:qwen-client-events
-            fetch('http://127.0.0.1:7777/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'qwen3-realtime-error',runId:'pre-fix',hypothesisId:'B',location:'meeting-recorder:startQwenRtWs:onmessage',traceId,msg:'[DEBUG] qwen client ws event',data:{type,error:msg.error?.message||msg.message||null},ts:Date.now()})}).catch(()=>{});
-            // #endregion
           }
 
           if (type === 'session.created') {
@@ -344,9 +337,6 @@ export default function MeetingRecorder({
         };
 
         socket.onerror = () => {
-          // #region debug-point B:qwen-client-ws-error
-          fetch('http://127.0.0.1:7777/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'qwen3-realtime-error',runId:'pre-fix',hypothesisId:'B',location:'meeting-recorder:startQwenRtWs:onerror',traceId,msg:'[DEBUG] qwen client ws error',data:{readyState:socket.readyState,attempt:attemptIndex,targetUrl},ts:Date.now()})}).catch(()=>{});
-          // #endregion
           clearTimeout(connTimeout);
           if (connected || settled || qwenWsRef.current !== socket) return;
           if (attemptIndex + 1 < candidates.length) {
@@ -358,9 +348,6 @@ export default function MeetingRecorder({
         };
 
         socket.onclose = (event) => {
-          // #region debug-point B:qwen-client-ws-close
-          fetch('http://127.0.0.1:7777/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'qwen3-realtime-error',runId:'pre-fix',hypothesisId:'B',location:'meeting-recorder:startQwenRtWs:onclose',traceId,msg:'[DEBUG] qwen client ws close',data:{code:event.code,reason:event.reason||null,wasClean:event.wasClean,connected,attempt:attemptIndex,targetUrl},ts:Date.now()})}).catch(()=>{});
-          // #endregion
           clearTimeout(connTimeout);
           if (qwenWsRef.current === socket) {
             qwenWsRef.current = null;

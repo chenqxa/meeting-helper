@@ -372,56 +372,129 @@ export async function PATCH(
       const input = body.addActionItem;
       // 客户端临时 id 作为 originalId：前端行 key 保持稳定，后续 PUT/DELETE 均可通过它定位台账行
       const originalId: string = (typeof input.id === 'string' && input.id.trim()) || `rd-${Date.now()}`;
-      const resolvedOwner = await resolveActionOwnerIdentity({
-        owner: input.assignee || input.owner || null,
-        ownerLoginId: input.ownerLoginId || null,
-        ownerOaId: input.ownerOaId || null,
-        dept: input.dept || null,
-      });
-      const newItem = {
+      const hasOwn = (k: string) => (input as any)[k] !== undefined;
+
+      // 责任人身份：仅在传入责任人相关字段时解析，避免用 null 覆盖既有值
+      let resolvedOwner: any = null;
+      if (hasOwn('owner') || hasOwn('assignee') || hasOwn('ownerLoginId') || hasOwn('ownerOaId') || hasOwn('dept')) {
+        resolvedOwner = await resolveActionOwnerIdentity({
+          owner: input.assignee || input.owner || null,
+          ownerLoginId: input.ownerLoginId || null,
+          ownerOaId: input.ownerOaId || null,
+          dept: input.dept || null,
+        });
+      }
+
+      const dueDateVal = (input as any).due_date !== undefined ? (input as any).due_date : (input as any).dueDate;
+      const dueTypeVal = (input as any).due_date_type !== undefined ? (input as any).due_date_type : (input as any).dueDateType;
+
+      const newItem: any = {
         ...input,
-        assignee: resolvedOwner.owner || input.assignee || input.owner || null,
-        owner: resolvedOwner.owner || input.owner || input.assignee || null,
-        ownerLoginId: resolvedOwner.ownerLoginId,
-        ownerOaId: resolvedOwner.ownerOaId,
-        dept: resolvedOwner.dept || input.dept || null,
         id: originalId,
         created_at: new Date().toISOString(),
       };
+      if (resolvedOwner) {
+        newItem.assignee = resolvedOwner.owner || input.assignee || input.owner || null;
+        newItem.owner = resolvedOwner.owner || input.owner || input.assignee || null;
+        newItem.ownerLoginId = resolvedOwner.ownerLoginId;
+        newItem.ownerOaId = resolvedOwner.ownerOaId;
+        newItem.dept = resolvedOwner.dept || input.dept || null;
+      }
 
       try {
-        // 1. 幂等检查 + 先写台账（主数据源）：按 originalId 查重防重试重复行；
-        //    台账写失败直接报错，前端保留临时行提示重试，不再产生"仅在 JSON"的孤儿项
+        // 1. 台账（主数据源）：按 originalId 幂等 upsert。
+        //    - 不存在 → 新建
+        //    - 已存在 → 更新（修复：此前命中已存在直接跳过，导致"新增"项后续行内编辑
+        //      (类型/日期/责任人/优先级)只堆在会议 JSON、永远写不进台账）
+        //    更新时不写 status / confidence / 稽核类字段：前端对新增项每次都强塞
+        //    status='confirmed'，无脑写入会把已流转为 done/blocked 的项打回。
         const existed = await getActionItemByMeetingAndOriginalId(meetingId, originalId);
-        const dbItem = existed ?? await createActionItem({
-          meetingId,
-          originalId,
-          description: newItem.description || '',
-          owner: resolvedOwner.owner,
-          ownerLoginId: resolvedOwner.ownerLoginId,
-          ownerOaId: resolvedOwner.ownerOaId,
-          dept: resolvedOwner.dept,
-          // 提出/责任人姓名 trim：手输易带首尾空格，导致部门精确匹配失败
-          proposer: ((input as any).proposer || '').trim() || null,
-          proposerLoginId: ((input as any).proposerLoginId || '').trim() || null,
-          proposerOaId: ((input as any).proposerOaId || '').trim() || null,
-          proposerDept: ((input as any).proposerDept || '').trim() || null,
-          dueDate: newItem.dueDate || newItem.due_date || null,
-          // 类型兜底：未显式指定时按有无日期判定（防新增项先算出 tbd 后填日期被固化）
-          dueDateType: (input as any).due_date_type || (newItem.dueDate || newItem.due_date ? 'date' : 'tbd'),
-          priority: newItem.priority || 'medium',
-          status: input.status || 'confirmed',
-          sourceText: newItem.sourceText || (input as any).source_sentence || null,
-          confidenceOwner: (newItem as any).confidence?.assignee ?? (newItem as any).confidence_owner ?? null,
-          confidenceDate: (newItem as any).confidence?.dueDate ?? (newItem as any).confidence_date ?? null,
-          reassignedFrom: (input as any).reassigned_from || null,
-        } as any);
+        let dbItem: Awaited<ReturnType<typeof createActionItem>>;
+        if (existed) {
+          const patch: Record<string, any> = {};
+          if (input.description !== undefined) patch.description = input.description || '';
+          if (resolvedOwner) {
+            patch.owner = newItem.owner;
+            patch.ownerLoginId = newItem.ownerLoginId;
+            patch.ownerOaId = newItem.ownerOaId;
+            patch.dept = newItem.dept;
+          }
+          if (hasOwn('proposer')) patch.proposer = String(input.proposer || '').trim() || null;
+          if (hasOwn('proposerLoginId')) patch.proposerLoginId = String(input.proposerLoginId || '').trim() || null;
+          if (hasOwn('proposerOaId')) patch.proposerOaId = String(input.proposerOaId || '').trim() || null;
+          if (hasOwn('proposerDept') || hasOwn('proposer_dept')) patch.proposerDept = String(input.proposerDept || input.proposer_dept || '').trim() || null;
+          if (dueDateVal !== undefined) patch.dueDate = dueDateVal || null;
+          if (dueTypeVal !== undefined) patch.dueDateType = dueTypeVal || null;
+          // 日期/类型一致性：填了日期而类型仍是空/tbd → 按 date（与 PUT 口径一致）
+          const effDate = patch.dueDate !== undefined ? patch.dueDate : existed.dueDate;
+          const effType = patch.dueDateType !== undefined ? patch.dueDateType : existed.dueDateType;
+          if (effDate && String(effDate).trim() && (!effType || effType === 'tbd')) {
+            patch.dueDateType = 'date';
+            newItem.due_date_type = 'date';
+            newItem.dueDateType = 'date';
+          }
+          if (input.priority !== undefined) patch.priority = input.priority || 'medium';
+          if (hasOwn('sourceText') || hasOwn('source_sentence')) patch.sourceText = input.sourceText || input.source_sentence || null;
+          if (hasOwn('reassigned_from')) patch.reassignedFrom = input.reassigned_from || null;
+
+          const row = await updateActionItem(existed.id, patch as any);
+          dbItem = (row ?? existed) as Awaited<ReturnType<typeof createActionItem>>;
+          console.log(`[PATCH addActionItem] 已存在，更新台账 ${existed.id} (${originalId})`);
+        } else {
+          dbItem = await createActionItem({
+            meetingId,
+            originalId,
+            description: newItem.description || '',
+            owner: resolvedOwner?.owner || input.owner || input.assignee || null,
+            ownerLoginId: resolvedOwner?.ownerLoginId || input.ownerLoginId || null,
+            ownerOaId: resolvedOwner?.ownerOaId || input.ownerOaId || null,
+            dept: resolvedOwner?.dept || input.dept || null,
+            // 提出/责任人姓名 trim：手输易带首尾空格，导致部门精确匹配失败
+            proposer: ((input as any).proposer || '').trim() || null,
+            proposerLoginId: ((input as any).proposerLoginId || '').trim() || null,
+            proposerOaId: ((input as any).proposerOaId || '').trim() || null,
+            proposerDept: ((input as any).proposerDept || '').trim() || null,
+            dueDate: newItem.dueDate || newItem.due_date || null,
+            // 类型兜底：未显式指定时按有无日期判定（防新增项先算出 tbd 后填日期被固化）
+            dueDateType: dueTypeVal || (newItem.dueDate || newItem.due_date ? 'date' : 'tbd'),
+            priority: newItem.priority || 'medium',
+            status: input.status || 'confirmed',
+            sourceText: newItem.sourceText || (input as any).source_sentence || null,
+            confidenceOwner: (newItem as any).confidence?.assignee ?? (newItem as any).confidence_owner ?? null,
+            confidenceDate: (newItem as any).confidence?.dueDate ?? (newItem as any).confidence_date ?? null,
+            reassignedFrom: (input as any).reassigned_from || null,
+          } as any);
+        }
 
         // 2. 台账成功后再写会议 JSON：失败仅告警不回滚（GET 以台账为主并集，不影响展示）
+        //    按 id 合并去重：命中同 id 就地替换，不再无脑追加（历史堆叠同一 id 多份副本，
+        //    会导致下次"保存纪要"派生时匹配到旧副本、把类型刷回 tbd）
         let updated: any = current;
         try {
-          const items = [...(current.actionItems || []), newItem];
-          updated = await updateMeeting(meetingId, { actionItems: items });
+          const rawItems: any[] = Array.isArray(current.actionItems) ? [...current.actionItems] : [];
+          const at = rawItems.findIndex((it: any) => it && String(it.id) === originalId);
+          if (at >= 0) rawItems[at] = { ...rawItems[at], ...newItem };
+          else rawItems.push(newItem);
+          const byId = new Map<string, any>();
+          for (const it of rawItems) {
+            if (!it || it.id === undefined || it.id === null) continue;
+            const key = String(it.id);
+            const prev = byId.get(key);
+            if (prev) {
+              const merged: any = { ...prev };
+              for (const [k, v] of Object.entries(it)) {
+                if (v !== undefined && v !== null) merged[k] = v;
+              }
+              byId.set(key, merged);
+            } else {
+              byId.set(key, it);
+            }
+          }
+          const deduped = Array.from(byId.values());
+          if (deduped.length !== rawItems.length) {
+            console.log(`[PATCH addActionItem] 会议 JSON 去重: ${rawItems.length} → ${deduped.length}`);
+          }
+          updated = await updateMeeting(meetingId, { actionItems: deduped });
         } catch (e) {
           console.warn('[PATCH addActionItem] 会议 JSON 更新失败（台账已写入，不影响展示）:', e instanceof Error ? e.message : e);
         }

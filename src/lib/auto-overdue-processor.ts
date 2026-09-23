@@ -62,28 +62,96 @@ async function pushWeCom(
   byOwner: Map<string, { items: string[]; displayName: string; taskIds: string[] }>,
   title: string,
   buildBody: (items: string[]) => string,
-): Promise<{ sent: number; failed: number }> {
-  const result = { sent: 0, failed: 0 };
+  pushType: 'due_reminder' | 'auto_x',
+): Promise<{ sent: number; failed: number; failedRecipients: string[] }> {
+  const result = { sent: 0, failed: 0, failedRecipients: [] as string[] };
   if (byOwner.size === 0) return result;
   try {
     const { sendTextCardMessage, resolveUserIdsByNames } = await import('@/lib/wecom-message');
+    const { recordPushLog } = await import('@/storage/database/push-log-storage');
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || '';
-    if (!baseUrl) return result;
     const names = [...new Set([...byOwner.values()].map(b => b.displayName))];
+
+    // 落地页未配置：明确记录失败，绝不静默（否则会出现"标记已提醒却没发"）
+    if (!baseUrl) {
+      for (const [loginId, b] of byOwner) {
+        result.failed++; result.failedRecipients.push(loginId);
+        void recordPushLog({ pushType, channel: 'wecom', recipient: b.displayName, taskIds: b.taskIds, success: false, error: 'NEXT_PUBLIC_APP_URL 未配置' });
+      }
+      console.warn('[auto-overdue] NEXT_PUBLIC_APP_URL 未配置，企微推送全部失败');
+      return result;
+    }
+
     const nameToUserId = await resolveUserIdsByNames(names, false);
     for (const [loginId, { items, displayName, taskIds }] of byOwner) {
       const userId = nameToUserId.get(displayName) || nameToUserId.get(loginId);
-      if (!userId) { result.failed++; continue; }
+      if (!userId) {
+        result.failed++; result.failedRecipients.push(loginId);
+        void recordPushLog({ pushType, channel: 'wecom', recipient: displayName, taskIds, success: false, error: '企微未匹配到用户' });
+        continue;
+      }
       const url = `${baseUrl}/kanban?view=my&shared=true${taskIds.length > 0 ? `&taskIds=${taskIds.join(',')}` : ''}`;
       try {
         const r = await sendTextCardMessage([userId], title, buildBody(items), url);
-        if (r.success) result.sent++; else result.failed++;
-      } catch { result.failed++; }
+        if (r.success) {
+          result.sent++;
+          void recordPushLog({ pushType, channel: 'wecom', recipient: displayName, taskIds, success: true });
+        } else {
+          result.failed++; result.failedRecipients.push(loginId);
+          void recordPushLog({ pushType, channel: 'wecom', recipient: displayName, taskIds, success: false, error: r.error || '发送失败' });
+        }
+      } catch (e) {
+        result.failed++; result.failedRecipients.push(loginId);
+        void recordPushLog({ pushType, channel: 'wecom', recipient: displayName, taskIds, success: false, error: e instanceof Error ? e.message : String(e) });
+      }
     }
   } catch (e) {
     console.warn('[auto-overdue] 企微推送异常:', e instanceof Error ? e.message : e);
   }
   return result;
+}
+
+// ── 到期提醒失败当天重试 1 次 ──
+const reminderRetryTimers = new Set<string>();
+function scheduleReminderRetry(candidates: ActionItem[], tomorrow: string) {
+  const token = `retry-${tomorrow}`;
+  if (reminderRetryTimers.has(token)) return;
+  reminderRetryTimers.add(token);
+  setTimeout(async () => {
+    try {
+      const all = await getAllActionItems();
+      const byId = new Map(all.map(i => [i.id, i]));
+      // 只重试：仍未被标记、仍明天到期、仍满足条件
+      const retry = candidates.filter(c => {
+        const cur = byId.get(c.id);
+        return !!cur && !cur.dueReminderAt && ymd(cur.dueDate) === tomorrow && isEligible(cur);
+      });
+      if (retry.length === 0) return;
+      const byOwner = new Map<string, { items: string[]; displayName: string; taskIds: string[] }>();
+      for (const c of retry) {
+        const key = String(c.ownerLoginId || c.owner || '').trim();
+        if (!key) continue;
+        if (!byOwner.has(key)) byOwner.set(key, { items: [], displayName: String(c.owner || key).trim(), taskIds: [] });
+        byOwner.get(key)!.items.push(String(c.description || '').slice(0, 30));
+        byOwner.get(key)!.taskIds.push(c.id);
+      }
+      const push = await pushWeCom(byOwner, `⏰ 行动项到期提醒（明天 ${fmtMD(tomorrow)}）`, (items) =>
+        `您有 ${items.length} 条行动项将于明天到期：\n${items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`).join('\n')}${items.length > 4 ? `\n…共${items.length}条` : ''}\n点击填写处理结果`,
+        'due_reminder');
+      const failedSet = new Set(push.failedRecipients);
+      const now = new Date().toISOString();
+      for (const c of retry) {
+        const key = String(c.ownerLoginId || c.owner || '').trim();
+        if (failedSet.has(key)) continue;
+        try { await updateActionItem(c.id, { dueReminderAt: now } as any); } catch { /* ignore */ }
+      }
+      console.log(`[due-reminder] 当天重试：候选 ${retry.length}，推送 ${push.sent}，失败 ${push.failed}`);
+    } catch (e) {
+      console.warn('[due-reminder] 当天重试异常:', e instanceof Error ? e.message : e);
+    } finally {
+      reminderRetryTimers.delete(token);
+    }
+  }, 30 * 60 * 1000);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -128,18 +196,24 @@ export async function runDueReminder(dryRun = false): Promise<DueReminderResult>
     // 推送
     const title = `⏰ 行动项到期提醒（明天 ${fmtMD(tomorrow)}）`;
     const push = await pushWeCom(byOwner, title, (items) =>
-      `您有 ${items.length} 条行动项将于明天到期：\n${items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`).join('\n')}${items.length > 4 ? `\n…共${items.length}条` : ''}\n点击填写处理结果`);
+      `您有 ${items.length} 条行动项将于明天到期：\n${items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`).join('\n')}${items.length > 4 ? `\n…共${items.length}条` : ''}\n点击填写处理结果`,
+      'due_reminder');
     base.pushed = push.sent;
 
-    // 标记已提醒（持久化 due_reminder_at，防止同日重复推）
+    // 仅"成功送达"的责任人才标记 due_reminder_at；失败项不标记，改由当天重试
+    const failedSet = new Set(push.failedRecipients);
     const now = new Date().toISOString();
     for (const c of candidates) {
+      const key = String(c.ownerLoginId || c.owner || '').trim();
+      if (failedSet.has(key)) continue;
       try {
         await updateActionItem(c.id, { dueReminderAt: now } as any);
       } catch (e) {
         console.warn(`[due-reminder] 标记失败 ${c.id}:`, e instanceof Error ? e.message : e);
       }
     }
+    // 失败责任人：当天重试 1 次
+    if (push.failed > 0) scheduleReminderRetry(candidates, tomorrow);
 
     console.log(`[due-reminder] ${tomorrow} 到期：候选 ${candidates.length}，推送 ${push.sent}，失败 ${push.failed}`);
     return base;
@@ -266,7 +340,8 @@ export async function runAutoOverdueX(dryRun = false): Promise<AutoOverdueXResul
     // ── 步骤 5：按人汇总推送 ──
     if (pushItems.size > 0) {
       const push = await pushWeCom(pushItems, '⚠️ 行动项超期自动打X通知', (items) =>
-        `因节点到期未填写，以下 ${items.length} 条行动项已自动打X并生成新任务：\n${items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`).join('\n')}${items.length > 4 ? `\n…共${items.length}条` : ''}\n请填写新任务节点并处理`);
+        `因节点到期未填写，以下 ${items.length} 条行动项已自动打X并生成新任务：\n${items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`).join('\n')}${items.length > 4 ? `\n…共${items.length}条` : ''}\n请填写新任务节点并处理`,
+        'auto_x');
       base.pushed = push.sent;
     }
 

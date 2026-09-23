@@ -8,6 +8,7 @@ import { logOperation } from '@/lib/operation-log';
 import { batchSendOAUserMessage } from '@/lib/chat-client';
 import { getBeijingParts } from '@/lib/beijing-time';
 import { recordPushLog } from '@/storage/database/continuous-push-log-storage';
+import { recordPushLog as recordDeliveryLog } from '@/storage/database/push-log-storage';
 import { getAllProgress } from '@/storage/database/continuous-progress-storage';
 import { isGroupOwner } from '@/lib/group-owners';
 
@@ -256,9 +257,11 @@ async function sendContinuousWeCom(
     for (const [loginId, { items: bucket, displayName }] of byOwner) {
       // 企微通讯录按姓名匹配，优先姓名、兜底 loginid
       const userId = nameToUserId.get(displayName) || nameToUserId.get(loginId);
+      const bucketIds = bucket.map(b => b.id);
       if (!userId) {
         console.warn(`[ContinuousPush][WeCom] ${displayName}(${loginId}) 未匹配企微用户，跳过`);
         result.failed++;
+        void recordDeliveryLog({ pushType: 'continuous', channel: 'wecom', meetingType, recipient: displayName, taskIds: bucketIds, success: false, error: '企微未匹配到用户' });
         continue;
       }
       const lines = bucket.slice(0, 4).map((t, i) => `${i + 1}. 🔄 ${String(t.description || '').slice(0, 26)}`).join('\n');
@@ -267,11 +270,17 @@ async function sendContinuousWeCom(
       const description = `【${date} 定时推送】\n${lines}${more}\n点击填写本期进展`;
       try {
         const r = await sendTextCardMessage([userId], title, description, url);
-        if (r.success) { result.sent++; console.log(`[ContinuousPush][WeCom] ✓ ${displayName}（${bucket.length}条）`); }
-        else { result.failed++; console.error(`[ContinuousPush][WeCom] ✗ ${displayName}:`, r.error); }
+        if (r.success) {
+          result.sent++; console.log(`[ContinuousPush][WeCom] ✓ ${displayName}（${bucket.length}条）`);
+          void recordDeliveryLog({ pushType: 'continuous', channel: 'wecom', meetingType, recipient: displayName, taskIds: bucketIds, success: true });
+        } else {
+          result.failed++; console.error(`[ContinuousPush][WeCom] ✗ ${displayName}:`, r.error);
+          void recordDeliveryLog({ pushType: 'continuous', channel: 'wecom', meetingType, recipient: displayName, taskIds: bucketIds, success: false, error: r.error || '发送失败' });
+        }
       } catch (e) {
         result.failed++;
         console.error(`[ContinuousPush][WeCom] ✗ ${displayName}:`, e instanceof Error ? e.message : e);
+        void recordDeliveryLog({ pushType: 'continuous', channel: 'wecom', meetingType, recipient: displayName, taskIds: bucketIds, success: false, error: e instanceof Error ? e.message : String(e) });
       }
     }
   } catch (e) {
@@ -298,14 +307,18 @@ async function sendContinuousIM(items: any[], meetingType: string, date: string)
       body: list,
       footer: '请在 OA 中更新进展',
     });
+    const recipient = String(tasks[0]?.owner || loginId);
+    const taskIds = tasks.map((t) => t.id);
     try {
       await batchSendOAUserMessage({
         oaUserIds: [loginId],
         content,
         idempotencyKey: `continuous-${date}-${loginId}`,
       });
+      void recordDeliveryLog({ pushType: 'continuous', channel: 'oa', meetingType, recipient, taskIds, success: true });
     } catch (e) {
       console.warn(`[ContinuousPush] IM 发送失败 ${loginId}:`, e instanceof Error ? e.message : e);
+      void recordDeliveryLog({ pushType: 'continuous', channel: 'oa', meetingType, recipient, taskIds, success: false, error: e instanceof Error ? e.message : String(e) });
     }
   }
 }

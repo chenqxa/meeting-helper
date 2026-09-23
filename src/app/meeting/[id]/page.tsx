@@ -75,6 +75,7 @@ interface Meeting {
   meetingDate?: string;
   status: 'draft' | 'locked' | 'archived' | 'review';
   organizer?: string;
+  organizerLoginId?: string;
   participants?: string[];
   content?: string;
   input_content?: string;
@@ -1051,6 +1052,9 @@ export default function MeetingEditorPage() {
   const [showDebug, setShowDebug] = useState(false);
   const [debugMarkdown, setDebugMarkdown] = useState('');
   const [userRole, setUserRole] = useState<string>('employee');
+  const [meName, setMeName] = useState<string>('');
+  const [meLoginId, setMeLoginId] = useState<string>('');
+  const [canEditOwnerPerm, setCanEditOwnerPerm] = useState<boolean>(false);
   const [projects, setProjects] = useState<any[]>([]);
   const [isUpdatingProject, setIsUpdatingProject] = useState(false);
   const [meetingTypes, setMeetingTypes] = useState<any[]>([]);
@@ -1065,9 +1069,18 @@ export default function MeetingEditorPage() {
 
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
-      if (d.success) setUserRole(d.data.role || 'employee');
+      if (d.success) {
+        setUserRole(d.data.role || 'employee');
+        setMeName(d.data.name || '');
+        setMeLoginId(d.data.loginid || '');
+      }
     }).catch(() => {});
-    
+
+    // 责任人编辑权限（admin/manager 有 canEditActionOwner；会议创建人走主持人条件）
+    fetch('/api/permissions/mine').then(r => r.json()).then(d => {
+      if (d.success) setCanEditOwnerPerm((d.data.permissions || []).includes('canEditActionOwner'));
+    }).catch(() => {});
+
     // 获取项目列表供关联使用
     fetch('/api/projects').then(r => r.json()).then(d => {
       if (d.success) setProjects(d.data || []);
@@ -1161,6 +1174,7 @@ export default function MeetingEditorPage() {
   };
 
   const handleGenerate = async () => {
+    if (isLocked) { alert('会议已归档，不能重新生成纪要；如需修改请先解锁'); return; }
     if (isGenerating) return;
     setIsGenerating(true);
     setGenStep('正在分析会议内容...');
@@ -1603,6 +1617,14 @@ export default function MeetingEditorPage() {
   }, [transcript, isEditingTranscript]);
 
   const isLocked = meeting?.status === 'locked';
+  // 责任人是否可编辑：未归档 且（admin/manager 权限 或 本人是会议创建人/主持人）
+  const canEditOwner = !isLocked && (
+    canEditOwnerPerm
+    || (!!meeting && (
+      meeting.organizerLoginId === meLoginId
+      || (!!meeting.organizer && normalizeName(meeting.organizer) === normalizeName(meName))
+    ))
+  );
 
   const handleSaveTranscript = async () => {
     setIsSavingTranscript(true);
@@ -1879,7 +1901,7 @@ export default function MeetingEditorPage() {
       </div> */}
 
       {/* AI超时提示 */}
-      {aiTimeout && (
+      {aiTimeout && !isLocked && (
         <div className="mb-3 flex items-center gap-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span>AI生成耗时较长（已超10分钟），请检查网络或重试</span>
@@ -2067,7 +2089,7 @@ export default function MeetingEditorPage() {
               <div className="p-5">
                 {meeting && minutes ? (
                   <MeetingMinutesBlock minutes={minutes} meeting={meeting}
-                    onRegenerate={handleGenerate}
+                    onRegenerate={isLocked ? undefined : handleGenerate}
                     isGenerating={isGenerating}
                     genStep={genStep}
                     generateProvider={generateProvider}
@@ -2095,6 +2117,7 @@ export default function MeetingEditorPage() {
                         <option value="deepseek">DeepSeek官方（V4 Flash）</option>
                         <option value="deepseek-v4-pro">DeepSeek官方（V4 Pro）</option>
                       </select>
+                      {!isLocked && (
                       <button
                         onClick={handleGenerate}
                         disabled={isGenerating}
@@ -2103,6 +2126,7 @@ export default function MeetingEditorPage() {
                         {isGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                         {isGenerating ? genStep || 'AI生成中...' : '开始生成纪要'}
                       </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -2116,6 +2140,7 @@ export default function MeetingEditorPage() {
                   <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-4">
                     <Sparkles className="w-12 h-12 opacity-30" />
                     <p className="text-sm">暂无AI摘要</p>
+                    {!isLocked && (
                     <button
                       onClick={handleGenerate}
                       disabled={isGenerating}
@@ -2124,6 +2149,7 @@ export default function MeetingEditorPage() {
                       {isGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                       {isGenerating ? '生成中...' : '点击生成AI摘要'}
                     </button>
+                    )}
                   </div>
                 ) : (
                   <>
@@ -2307,7 +2333,7 @@ export default function MeetingEditorPage() {
                             value={item.owner || ''}
                             placeholder="负责人"
                             tone="blue"
-                            readOnly={isLocked}
+                            readOnly={!canEditOwner}
                             onPick={(name, extra) => patchAction(item.id, { owner: name, ...extra, confidence_owner: 1 } as any)}
                           />
                           {/* 节点模式 */}

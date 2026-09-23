@@ -3,13 +3,13 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import DashboardLayout from '@/components/layout/dashboard-layout';
-import { RefreshCw, Search, FileText, ArrowUpDown, Download, Upload, Pencil, Filter, ChevronDown, ExternalLink } from 'lucide-react';
+import { RefreshCw, Search, FileText, ArrowUpDown, Download, Upload, Pencil, Filter, ChevronDown, ExternalLink, X } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { WeaverPagination } from '@/components/ui/weaver-pagination';
 import { DeptSelect } from '@/components/ui/dept-select';
-import { autoFetchSourceName, autoFetchSourceDesc, firstAutoFetchSourceKey } from '@/lib/auto-fetch-sources-meta';
+import { AUTO_FETCH_SOURCES, autoFetchSourceName, autoFetchSourceDesc } from '@/lib/auto-fetch-sources-meta';
 
 interface Item {
   id: string; description: string; owner: string | null; dept: string | null;
@@ -114,6 +114,10 @@ export default function ContinuousPage() {
   const [ownerPos, setOwnerPos] = useState<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 0 });
   const [departments, setDepartments] = useState<string[]>([]);
   const [userRole, setUserRole] = useState('');
+  // 取数源选择弹窗
+  const [srcPickerItem, setSrcPickerItem] = useState<Item | null>(null);
+  const [srcOptions, setSrcOptions] = useState<{ key: string; name: string; src: string; how: string; builtin: boolean; enabled: boolean }[]>([]);
+  const [srcSearch, setSrcSearch] = useState('');
   const [currentUserName, setCurrentUserName] = useState('');
   const [currentUserLoginId, setCurrentUserLoginId] = useState('');
   const [employees, setEmployees] = useState<string[]>([]);
@@ -128,7 +132,6 @@ export default function ContinuousPage() {
   const [statsFilter, setStatsFilter] = useState('all'); // all | filled | unfilled
   const [statsTypeFilter, setStatsTypeFilter] = useState('all'); // all | 会议类型
   const [preview, setPreview] = useState<{ url: string; filename: string; kind: string; loading: boolean; error: string } | null>(null);
-  const [syncing, setSyncing] = useState(false);
   const [autoBusy, setAutoBusy] = useState<string | null>(null); // 正在切换「自动取数」的项
 
   const openFilterMenu = (key: string, e: React.MouseEvent) => {
@@ -185,6 +188,14 @@ export default function ContinuousPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // 导入权限：仅具备 canBatchImport 的用户可见导入入口
+  useEffect(() => {
+    fetch('/api/permissions/mine')
+      .then(r => r.json())
+      .then(d => { if (d.success) setCanBatchImport((d.data.permissions || []).includes('canBatchImport')); })
+      .catch(() => {});
+  }, []);
+
   const loadStats = useCallback(async () => {
     setStatsLoading(true);
     try {
@@ -195,23 +206,6 @@ export default function ContinuousPage() {
   }, []);
 
   useEffect(() => { if (view === 'stats') loadStats(); }, [view, loadStats]);
-
-  const syncFromOA = useCallback(async () => {
-    setSyncing(true);
-    try {
-      const r = await fetch('/api/oa/pull-results', { method: 'POST' }).then(r => r.json());
-      if (r.success) {
-        const d = r.data || {};
-        alert(`同步完成：行动项 ${d.synced || 0} 条，持续项进展 ${d.contSynced || 0} 条`);
-        await loadStats();
-      } else {
-        alert('同步失败：' + (r.error || '未知错误'));
-      }
-    } catch {
-      alert('同步失败：网络错误');
-    }
-    setSyncing(false);
-  }, [loadStats]);
 
   const fetchAttachment = useCallback(async (fileId: string) => {
     setPreview({ url: '', filename: `附件${fileId}`, kind: '', loading: true, error: '' });
@@ -240,13 +234,44 @@ export default function ContinuousPage() {
     setPreview({ url, filename: name, kind, loading: false, error: '' });
   }, []);
 
-  // 开启/关闭「自动取数」：自动取数的持续项每周由系统定时自动写入本期进展，不再催人填报；
-  // 开启时绑定取数源（目前默认首个可用源「呆滞出库」）
-  const toggleAutoFetch = useCallback(async (item: Item, on: boolean) => {
+  // 需要绑定参数的取数源：参数项定义（当前仅退料按车间）
+  const SOURCE_PARAM_FIELDS: Record<string, { key: string; label: string; options: string[] }[]> = {
+    'k3-material-return': [{ key: 'dept', label: '车间', options: ['装配', '精益', '光电', '其他'] }],
+  };
+
+  // 开启/切换/关闭「自动取数」：选定取数源（可带参数）后由系统定时自动写入本期进展，不再催人填报（admin）
+  // 绑定前先 dry-run 预演本期结果，确认后再保存
+  const setAutoFetchSource = useCallback(async (item: Item, sourceKey: string, presetParams?: Record<string, unknown> | null) => {
+    const on = !!sourceKey;
+    let params: Record<string, unknown> | null = presetParams ?? null;
+    if (on && presetParams === undefined) {
+      // 该源需要参数：弹窗让 admin 指定（当前单参数场景，如车间）
+      const fields = SOURCE_PARAM_FIELDS[sourceKey]?.[0];
+      if (fields) {
+        const existing = ((item as any).auto_fetch_params || {})[fields.key];
+        const def = (typeof existing === 'string' && existing) || fields.options[0];
+        const val = window.prompt(`${fields.label}（${fields.options.join(' / ')}）`, def);
+        if (val === null) return; // 取消
+        params = { [fields.key]: (val.trim() || def) };
+      }
+    }
     setAutoBusy(item.id);
     try {
+      if (on) {
+        // 预览（不写库）：让 admin 看到本期会写入什么，再确认
+        let previewText = '该源本期未取到数据（可能无业务数据）。';
+        try {
+          const pr = await fetch('/api/continuous/auto-fetch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actionId: item.id, source: sourceKey, params, dryRun: true }),
+          }).then(r => r.json());
+          const pv = (pr?.data || pr)?.previews?.[0];
+          if (pv?.progress) previewText = `本期预演结果：\n${pv.progress}`;
+        } catch { /* 预览失败不阻断 */ }
+        if (!window.confirm(`${previewText}\n\n确认绑定「${autoFetchSourceName(sourceKey) || sourceKey}」并停止人工催报？`)) return;
+      }
       const body: any = { auto_fetch: on };
-      if (on) body.auto_fetch_source = firstAutoFetchSourceKey();
+      if (on) { body.auto_fetch_source = sourceKey; body.auto_fetch_params = params; }
       const res = await fetch(`/api/actions/${item.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -254,13 +279,28 @@ export default function ContinuousPage() {
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j.success) { alert((j as any).error || '设置失败'); return; }
       setItems(prev => prev.map(x => x.id === item.id
-        ? { ...x, auto_fetch: on ? 1 : 0, auto_fetch_source: on ? firstAutoFetchSourceKey() : null }
+        ? { ...x, auto_fetch: on ? 1 : 0, auto_fetch_source: on ? sourceKey : null, auto_fetch_params: on ? params : null } as any
         : x));
     } catch {
       alert('设置失败：网络错误');
     } finally {
       setAutoBusy(null);
     }
+  }, []);
+
+  // 打开取数源选择弹窗（内置 + 自定义，可搜索）
+  const openSrcPicker = useCallback(async (item: Item) => {
+    setSrcPickerItem(item);
+    setSrcSearch('');
+    const fallback = () => AUTO_FETCH_SOURCES.map(s => ({ key: s.key, name: s.name, src: s.src, how: s.how, builtin: true, enabled: true }));
+    try {
+      const r = await fetch('/api/auto-fetch-sources').then(x => x.json()).catch(() => null);
+      if (r?.success) {
+        const builtin = (r.data.builtin || []).map((s: any) => ({ key: s.key, name: s.name, src: s.src || '', how: s.how || '', builtin: true, enabled: true }));
+        const custom = (r.data.custom || []).map((s: any) => ({ key: s.key, name: s.name, src: s.src || '', how: s.how || '', builtin: false, enabled: !!s.enabled }));
+        setSrcOptions([...custom, ...builtin]);
+      } else { setSrcOptions(fallback()); }
+    } catch { setSrcOptions(fallback()); }
   }, []);
 
   const filterOptions = useMemo(() => {
@@ -432,6 +472,7 @@ export default function ContinuousPage() {
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [canBatchImport, setCanBatchImport] = useState(false);
 
   return (
     <DashboardLayout>
@@ -454,10 +495,12 @@ export default function ContinuousPage() {
           </div>
           <div className="flex items-center gap-2">
             {view === 'list' && (<>
+            {canBatchImport && (<>
             <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); }} />
             <button onClick={() => fileInputRef.current?.click()} className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-1.5">
               <Upload className="w-3.5 h-3.5" /> 导入Excel/CSV
             </button>
+            </>)}
             <button onClick={exportCSV} className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-1.5">
               <Download className="w-3.5 h-3.5" /> 导出CSV
             </button>
@@ -467,10 +510,6 @@ export default function ContinuousPage() {
             </>)}
             {view === 'stats' && (
             <>
-            <button onClick={syncFromOA} disabled={syncing}
-              className="h-9 px-3 rounded-xl border border-blue-200 bg-blue-50 text-xs font-medium text-blue-600 hover:bg-blue-100 flex items-center gap-1.5 disabled:opacity-50 transition-all">
-              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} /> {syncing ? '同步中...' : '立即同步OA'}
-            </button>
             <button onClick={loadStats} className="w-9 h-9 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-blue-600 hover:border-blue-200 transition-all">
               <RefreshCw className={`w-4 h-4 ${statsLoading ? 'animate-spin' : ''}`} />
             </button>
@@ -541,7 +580,7 @@ export default function ContinuousPage() {
                       <Filter className={`w-3 h-3 ${filters.dept ? 'text-blue-600 fill-blue-600' : 'text-slate-300 hover:text-slate-500'}`} />
                     </div>
                   </th>
-                  <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap" title="开启后每周定时自动取数写入本期进展，系统不再催人填报">
+                  <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap" title="选择取数源后由系统定时自动取数并写入本期进展，系统不再催人填报">
                     自动取数
                   </th>
                   <th className="text-center px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">
@@ -723,18 +762,20 @@ export default function ContinuousPage() {
                       </td>
                       <td className="px-4 py-3 text-center whitespace-nowrap">
                         {userRole === 'admin' ? (
-                          <div className="flex flex-col items-center gap-0.5">
-                            <Switch
-                              checked={!!(item as any).auto_fetch}
-                              onCheckedChange={(on: boolean) => toggleAutoFetch(item, on)}
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
                               disabled={autoBusy === item.id}
-                              aria-label="自动取数"
-                              title={((item as any).auto_fetch ? '已开启自动取数：每周定时自动写本期进展，不再催人填报' : '开启自动取数：每周定时自动写本期进展，不再催人填报')}
-                            />
-                            <span className="text-[10px] text-slate-400 leading-none"
-                              title={((item as any).auto_fetch ? (autoFetchSourceDesc((item as any).auto_fetch_source) || '') : '')}>
-                              {((item as any).auto_fetch ? (autoFetchSourceName((item as any).auto_fetch_source) || '—') : '—')}
-                            </span>
+                              onClick={() => openSrcPicker(item)}
+                              title={((item as any).auto_fetch ? (autoFetchSourceDesc((item as any).auto_fetch_source) || '') : '点击选择取数源（可搜索）')}
+                              className={`h-7 max-w-[10rem] text-xs rounded-lg border bg-white px-2 outline-none cursor-pointer inline-flex items-center gap-1 ${(item as any).auto_fetch ? 'border-blue-300 text-blue-700' : 'border-slate-200 text-slate-500'}`}
+                            >
+                              <span className="truncate">{((item as any).auto_fetch ? (autoFetchSourceName((item as any).auto_fetch_source) || (item as any).auto_fetch_source || '未命名源') : '选择取数源')}</span>
+                              <ChevronDown className="w-3 h-3 flex-shrink-0 opacity-60" />
+                            </button>
+                            {(item as any).auto_fetch && (item as any).auto_fetch_params?.dept && (
+                              <span className="text-[10px] text-slate-400" title="绑定参数">{String((item as any).auto_fetch_params.dept)}</span>
+                            )}
                           </div>
                         ) : ((item as any).auto_fetch ? (
                           <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full"
@@ -1094,6 +1135,60 @@ export default function ContinuousPage() {
           );
         })()}
       </div>
+
+      {/* 取数源选择弹窗（可搜索；内置 + 自定义） */}
+      {srcPickerItem && (() => {
+        const kw = srcSearch.trim().toLowerCase();
+        const list = srcOptions.filter(s => !kw
+          || s.name.toLowerCase().includes(kw)
+          || s.key.toLowerCase().includes(kw)
+          || (s.src || '').toLowerCase().includes(kw)
+          || (s.how || '').toLowerCase().includes(kw));
+        return (
+          <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={() => setSrcPickerItem(null)}>
+            <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="px-5 py-4 border-b border-slate-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-base font-bold text-slate-800">选择取数源</h3>
+                  <button onClick={() => setSrcPickerItem(null)} className="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400"><X className="w-4 h-4" /></button>
+                </div>
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-300 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input autoFocus value={srcSearch} onChange={e => setSrcSearch(e.target.value)} placeholder="搜名称 / key / 来源 / 口径..."
+                    className="w-full h-9 pl-9 pr-3 text-sm rounded-lg border border-slate-200 outline-none focus:border-blue-400" />
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2">
+                {((srcPickerItem as any).auto_fetch) && (
+                  <button
+                    onClick={() => { const it = srcPickerItem; setSrcPickerItem(null); setAutoFetchSource(it, ''); }}
+                    className="w-full text-left px-3 py-2 rounded-lg hover:bg-red-50 text-sm text-red-500 mb-1"
+                  >关闭（不自动取数）</button>
+                )}
+                {list.length === 0 && <div className="px-3 py-6 text-center text-sm text-slate-300">没有匹配的取数源</div>}
+                {list.map(s => {
+                  const active = (srcPickerItem as any).auto_fetch_source === s.key;
+                  return (
+                    <button key={s.key}
+                      onClick={() => { const it = srcPickerItem; setSrcPickerItem(null); setAutoFetchSource(it, s.key); }}
+                      className={`w-full text-left px-3 py-2 rounded-lg hover:bg-blue-50/60 ${active ? 'bg-blue-50' : ''}`}
+                    >
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-sm font-semibold ${active ? 'text-blue-700' : 'text-slate-700'}`}>{s.name}</span>
+                        <code className="text-[10px] text-slate-400">{s.key}</code>
+                        {!s.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-600 border border-violet-100">自定义</span>}
+                        {!s.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400">停用</span>}
+                      </div>
+                      {s.src && <div className="text-[11px] text-slate-500 mt-0.5 truncate">{s.src}</div>}
+                      {s.how && <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-2">{s.how}</div>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </DashboardLayout>
   );
 }

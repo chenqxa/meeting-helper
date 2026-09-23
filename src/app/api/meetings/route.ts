@@ -2,9 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createMeeting } from '@/storage';
 import { getCurrentUser } from '@/lib/session';
 import { logOperation } from '@/lib/operation-log';
+import { guardPermission } from '@/lib/api-guard';
 
 export async function POST(request: NextRequest) {
   try {
+    // 建会权限：默认全员（canCreateMeeting，可由权限矩阵/人员级收紧）
+    const guard = await guardPermission('canCreateMeeting');
+    if (!guard.ok) return guard.response;
+
     const body = await request.json();
     const { title, type, meetingDate, department, participants, organizer, inputType, content, fileUrl, fileName, projectId } = body;
 
